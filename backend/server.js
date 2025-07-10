@@ -33,15 +33,17 @@ const connectDB = async () => {
 
 connectDB()
 
-// User Schema
+// User Schema - Updated to allow flexible roles
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true, trim: true },
   email: { type: String, required: true, unique: true, trim: true, lowercase: true },
   password: { type: String, required: true, minlength: 6 },
-  role: { type: String, enum: ["donor", "requester", "admin"], required: true },
+  role: { type: String, enum: ["donor", "requester", "admin"], default: null },
   bloodGroup: { type: String, required: true, enum: ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"] },
   isAvailable: { type: Boolean, default: true },
   matchStatus: { type: String, default: "Available" },
+  isDonor: { type: Boolean, default: false },
+  isRequester: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
 })
 
@@ -148,10 +150,14 @@ mongoose.connection.once("open", () => {
 
 // Validation middleware
 const validateSignup = (req, res, next) => {
-  const { username, email, password, role, bloodGroup } = req.body
+  const { username, email, password, bloodGroup } = req.body
 
-  if (!username || !email || !password || !role || !bloodGroup) {
-    return res.status(400).json({ message: "All fields are required" })
+  if (!username || !email || !password || !bloodGroup) {
+    return res.status(400).json({ message: "Username, email, password, and blood group are required" })
+  }
+
+  if (username.trim().length < 3) {
+    return res.status(400).json({ message: "Username must be at least 3 characters long" })
   }
 
   if (password.length < 6) {
@@ -161,10 +167,6 @@ const validateSignup = (req, res, next) => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
   if (!emailRegex.test(email)) {
     return res.status(400).json({ message: "Please enter a valid email address" })
-  }
-
-  if (!["donor", "requester"].includes(role)) {
-    return res.status(400).json({ message: "Invalid role" })
   }
 
   if (!["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].includes(bloodGroup)) {
@@ -177,7 +179,7 @@ const validateSignup = (req, res, next) => {
 // Auth Routes
 app.post("/api/auth/signup", validateSignup, async (req, res) => {
   try {
-    const { username, email, password, role, bloodGroup } = req.body
+    const { username, email, password, bloodGroup } = req.body
 
     // Check if user already exists
     const existingUser = await User.findOne({
@@ -193,13 +195,13 @@ app.post("/api/auth/signup", validateSignup, async (req, res) => {
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 12)
 
-    // Create user
+    // Create user without role initially
     const user = new User({
       username: username.trim(),
       email: email.trim().toLowerCase(),
       password: hashedPassword,
-      role,
       bloodGroup,
+      role: null, // User will select role after signup
     })
 
     await user.save()
@@ -219,6 +221,8 @@ app.post("/api/auth/signup", validateSignup, async (req, res) => {
         bloodGroup: user.bloodGroup,
         isAvailable: user.isAvailable,
         matchStatus: user.matchStatus,
+        isDonor: user.isDonor,
+        isRequester: user.isRequester,
       },
     })
   } catch (error) {
@@ -241,13 +245,13 @@ app.post("/api/auth/login", async (req, res) => {
     // Find user
     const user = await User.findOne({ username: username.trim() })
     if (!user) {
-      return res.status(400).json({ message: "Invalid credentials" })
+      return res.status(400).json({ message: "Invalid username or password" })
     }
 
     // Check password
     const isMatch = await bcrypt.compare(password, user.password)
     if (!isMatch) {
-      return res.status(400).json({ message: "Invalid credentials" })
+      return res.status(400).json({ message: "Invalid username or password" })
     }
 
     // Generate JWT token
@@ -265,6 +269,8 @@ app.post("/api/auth/login", async (req, res) => {
         bloodGroup: user.bloodGroup,
         isAvailable: user.isAvailable,
         matchStatus: user.matchStatus,
+        isDonor: user.isDonor,
+        isRequester: user.isRequester,
       },
     })
   } catch (error) {
@@ -288,9 +294,64 @@ app.get("/api/auth/profile", authenticateToken, async (req, res) => {
       bloodGroup: user.bloodGroup,
       isAvailable: user.isAvailable,
       matchStatus: user.matchStatus,
+      isDonor: user.isDonor,
+      isRequester: user.isRequester,
     })
   } catch (error) {
     console.error("Profile error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+// New route to update user role
+app.put("/api/auth/update-role", authenticateToken, async (req, res) => {
+  try {
+    const { role, bloodGroup } = req.body
+
+    if (!role || !["donor", "requester"].includes(role)) {
+      return res.status(400).json({ message: "Valid role (donor or requester) is required" })
+    }
+
+    const updateData = { role }
+
+    if (bloodGroup && ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].includes(bloodGroup)) {
+      updateData.bloodGroup = bloodGroup
+    }
+
+    // Update role-specific flags
+    if (role === "donor") {
+      updateData.isDonor = true
+    } else if (role === "requester") {
+      updateData.isRequester = true
+    }
+
+    const user = await User.findByIdAndUpdate(req.user.userId, updateData, { new: true }).select("-password")
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    // Generate new token with updated role
+    const token = jwt.sign({ userId: user._id, username: user.username, role: user.role }, JWT_SECRET, {
+      expiresIn: "24h",
+    })
+
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        bloodGroup: user.bloodGroup,
+        isAvailable: user.isAvailable,
+        matchStatus: user.matchStatus,
+        isDonor: user.isDonor,
+        isRequester: user.isRequester,
+      },
+    })
+  } catch (error) {
+    console.error("Update role error:", error)
     res.status(500).json({ message: "Server error" })
   }
 })
