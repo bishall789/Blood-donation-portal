@@ -466,6 +466,7 @@ app.post("/api/auth/login", checkDBConnection, async (req, res) => {
         isAvailable: user.isAvailable,
         matchStatus: user.matchStatus,
         isDonor: user.isDonor,
+        isDonor: user.isDonor,
         isRequester: user.isRequester,
       },
     })
@@ -591,7 +592,7 @@ app.put("/api/donor/availability", authenticateToken, checkDBConnection, async (
       return res.status(400).json({ message: "isAvailable must be a boolean" })
     }
 
-    // Update donor availability
+    // Update donor availability and reset match status when becoming available
     const updateData = {
       isAvailable,
       matchStatus: isAvailable ? "Available" : "Unavailable",
@@ -621,9 +622,17 @@ app.put("/api/donor/availability", authenticateToken, checkDBConnection, async (
           { matchId: match._id, donorName: match.donorName },
         )
       }
+    } else {
+      // When donor becomes available again, they can receive new matches
+      console.log("✅ Donor became available again, ready for new matches")
     }
 
-    res.json({ message: "Availability updated successfully" })
+    res.json({
+      message: "Availability updated successfully",
+      status: isAvailable
+        ? "You are now available for new blood donation matches"
+        : "You are now unavailable for blood donation",
+    })
   } catch (error) {
     console.error("Update availability error:", error)
     res.status(500).json({ message: "Server error" })
@@ -800,6 +809,54 @@ app.get("/api/requester/notifications", authenticateToken, checkDBConnection, as
   }
 })
 
+// Allow requesters to create new requests even after being matched
+app.post("/api/requester/new-request", authenticateToken, checkDBConnection, async (req, res) => {
+  try {
+    if (req.user.role !== "requester") {
+      return res.status(403).json({ message: "Only requesters can create blood requests" })
+    }
+
+    const { bloodGroup, urgency, description } = req.body
+
+    if (!bloodGroup || !urgency) {
+      return res.status(400).json({ message: "Blood group and urgency are required" })
+    }
+
+    if (!["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].includes(bloodGroup)) {
+      return res.status(400).json({ message: "Invalid blood group" })
+    }
+
+    if (!["low", "medium", "high", "critical"].includes(urgency)) {
+      return res.status(400).json({ message: "Invalid urgency level" })
+    }
+
+    const user = await User.findById(req.user.userId)
+
+    const request = new Request({
+      requester: req.user.userId,
+      requesterName: user.username,
+      bloodGroup,
+      urgency,
+      description: description?.trim() || "",
+    })
+
+    await request.save()
+
+    // Reset user match status when creating new request
+    await User.findByIdAndUpdate(req.user.userId, {
+      matchStatus: "Active",
+    })
+
+    res.status(201).json({
+      message: "New request created successfully. You can now receive new matches.",
+      requestId: request._id,
+    })
+  } catch (error) {
+    console.error("Create new request error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
 // ENHANCED Admin Routes
 app.get("/api/admin/donors", authenticateToken, checkDBConnection, async (req, res) => {
   try {
@@ -807,11 +864,11 @@ app.get("/api/admin/donors", authenticateToken, checkDBConnection, async (req, r
       return res.status(403).json({ message: "Admin access required" })
     }
 
-    // Only show available donors (not matched or unavailable)
+    // Only show donors who are available AND not currently matched
     const donors = await User.find({
       role: "donor",
       isAvailable: true,
-      matchStatus: { $in: ["Available"] },
+      matchStatus: "Available", // Exclude "Matched" status donors
     })
       .select("-password")
       .sort({ createdAt: -1 })
@@ -829,9 +886,9 @@ app.get("/api/admin/requests", authenticateToken, checkDBConnection, async (req,
       return res.status(403).json({ message: "Admin access required" })
     }
 
-    // Only show pending requests (not cancelled or completed)
+    // Only show pending requests (not matched, cancelled, or completed)
     const requests = await Request.find({
-      status: { $in: ["Pending", "Matched"] },
+      status: "Pending", // Only pending requests, not matched ones
     }).sort({ createdAt: -1 })
 
     res.json(requests)
@@ -847,7 +904,11 @@ app.get("/api/admin/matches", authenticateToken, checkDBConnection, async (req, 
       return res.status(403).json({ message: "Admin access required" })
     }
 
-    const matches = await Match.find().sort({ createdAt: -1 })
+    // Only show pending matches (not accepted, rejected, or completed)
+    const matches = await Match.find({
+      status: "Pending", // Only show pending matches for admin action
+    }).sort({ createdAt: -1 })
+
     res.json(matches)
   } catch (error) {
     console.error("Get matches error:", error)
