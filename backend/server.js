@@ -112,6 +112,15 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  // Contact information for matching
+  phone: {
+    type: String,
+    trim: true,
+  },
+  location: {
+    type: String,
+    trim: true,
+  },
   createdAt: {
     type: Date,
     default: Date.now,
@@ -129,7 +138,7 @@ const requestSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
 })
 
-// Match Schema
+// Match Schema - Enhanced with contact information
 const matchSchema = new mongoose.Schema({
   donor: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   requester: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
@@ -137,7 +146,31 @@ const matchSchema = new mongoose.Schema({
   donorName: { type: String, required: true },
   requesterName: { type: String, required: true },
   bloodGroup: { type: String, required: true },
-  status: { type: String, default: "Pending", enum: ["Pending", "Accepted", "Rejected", "Completed"] },
+  status: { type: String, default: "Pending", enum: ["Pending", "Accepted", "Rejected", "Completed", "Cancelled"] },
+  // Contact information shared after match acceptance
+  donorInfo: {
+    email: String,
+    phone: String,
+    location: String,
+  },
+  requesterInfo: {
+    email: String,
+    phone: String,
+    location: String,
+    urgency: String,
+    description: String,
+  },
+  createdAt: { type: Date, default: Date.now },
+})
+
+// Notification Schema
+const notificationSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  type: { type: String, required: true }, // 'match_found', 'request_cancelled', 'donor_unavailable'
+  title: { type: String, required: true },
+  message: { type: String, required: true },
+  data: { type: mongoose.Schema.Types.Mixed }, // Additional data like contact info
+  read: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
 })
 
@@ -155,6 +188,7 @@ const historySchema = new mongoose.Schema({
 const User = mongoose.model("User", userSchema)
 const Request = mongoose.model("Request", requestSchema)
 const Match = mongoose.model("Match", matchSchema)
+const Notification = mongoose.model("Notification", notificationSchema)
 const History = mongoose.model("History", historySchema)
 
 // JWT Secret
@@ -187,6 +221,23 @@ const authenticateToken = (req, res, next) => {
     req.user = user
     next()
   })
+}
+
+// Helper function to create notifications
+const createNotification = async (userId, type, title, message, data = {}) => {
+  try {
+    const notification = new Notification({
+      userId,
+      type,
+      title,
+      message,
+      data,
+    })
+    await notification.save()
+    console.log(`📢 Notification created for user ${userId}: ${title}`)
+  } catch (error) {
+    console.error("Error creating notification:", error)
+  }
 }
 
 // Blood compatibility logic
@@ -527,7 +578,7 @@ app.get("/api/test/db", checkDBConnection, async (req, res) => {
   }
 })
 
-// Donor Routes
+// ENHANCED Donor Routes
 app.put("/api/donor/availability", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "donor") {
@@ -540,7 +591,37 @@ app.put("/api/donor/availability", authenticateToken, checkDBConnection, async (
       return res.status(400).json({ message: "isAvailable must be a boolean" })
     }
 
-    await User.findByIdAndUpdate(req.user.userId, { isAvailable })
+    // Update donor availability
+    const updateData = {
+      isAvailable,
+      matchStatus: isAvailable ? "Available" : "Unavailable",
+    }
+
+    await User.findByIdAndUpdate(req.user.userId, updateData)
+
+    // If donor becomes unavailable, cancel any pending matches
+    if (!isAvailable) {
+      console.log("🚫 Donor became unavailable, cancelling pending matches...")
+
+      const pendingMatches = await Match.find({
+        donor: req.user.userId,
+        status: "Pending",
+      }).populate("requester")
+
+      for (const match of pendingMatches) {
+        // Cancel the match
+        await Match.findByIdAndUpdate(match._id, { status: "Cancelled" })
+
+        // Notify the requester
+        await createNotification(
+          match.requester._id,
+          "donor_unavailable",
+          "Donor Unavailable",
+          `The donor ${match.donorName} is no longer available for your ${match.bloodGroup} blood request.`,
+          { matchId: match._id, donorName: match.donorName },
+        )
+      }
+    }
 
     res.json({ message: "Availability updated successfully" })
   } catch (error) {
@@ -564,7 +645,23 @@ app.get("/api/donor/history", authenticateToken, checkDBConnection, async (req, 
   }
 })
 
-// Requester Routes
+// Get donor notifications
+app.get("/api/donor/notifications", authenticateToken, checkDBConnection, async (req, res) => {
+  try {
+    if (req.user.role !== "donor") {
+      return res.status(403).json({ message: "Only donors can view notifications" })
+    }
+
+    const notifications = await Notification.find({ userId: req.user.userId }).sort({ createdAt: -1 }).limit(50)
+
+    res.json(notifications)
+  } catch (error) {
+    console.error("Get notifications error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+// ENHANCED Requester Routes
 app.post("/api/requester/request", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "requester") {
@@ -597,7 +694,10 @@ app.post("/api/requester/request", authenticateToken, checkDBConnection, async (
 
     await request.save()
 
-    res.status(201).json({ message: "Request created successfully" })
+    res.status(201).json({
+      message: "Request created successfully",
+      requestId: request._id,
+    })
   } catch (error) {
     console.error("Create request error:", error)
     res.status(500).json({ message: "Server error" })
@@ -619,14 +719,103 @@ app.get("/api/requester/requests", authenticateToken, checkDBConnection, async (
   }
 })
 
-// Admin Routes
+// NEW: Cancel blood request
+app.put("/api/requester/requests/:requestId/cancel", authenticateToken, checkDBConnection, async (req, res) => {
+  try {
+    if (req.user.role !== "requester") {
+      return res.status(403).json({ message: "Only requesters can cancel their requests" })
+    }
+
+    const { requestId } = req.params
+
+    if (!mongoose.Types.ObjectId.isValid(requestId)) {
+      return res.status(400).json({ message: "Invalid request ID" })
+    }
+
+    // Find the request
+    const request = await Request.findOne({
+      _id: requestId,
+      requester: req.user.userId,
+    })
+
+    if (!request) {
+      return res.status(404).json({ message: "Request not found" })
+    }
+
+    if (request.status === "Cancelled") {
+      return res.status(400).json({ message: "Request is already cancelled" })
+    }
+
+    // Update request status
+    await Request.findByIdAndUpdate(requestId, { status: "Cancelled" })
+
+    // Find and cancel any pending matches for this request
+    const pendingMatches = await Match.find({
+      request: requestId,
+      status: { $in: ["Pending", "Accepted"] },
+    }).populate("donor")
+
+    for (const match of pendingMatches) {
+      // Cancel the match
+      await Match.findByIdAndUpdate(match._id, { status: "Cancelled" })
+
+      // Reset donor availability if they were matched
+      if (match.status === "Accepted") {
+        await User.findByIdAndUpdate(match.donor._id, {
+          isAvailable: true,
+          matchStatus: "Available",
+        })
+      }
+
+      // Notify the donor
+      await createNotification(
+        match.donor._id,
+        "request_cancelled",
+        "Blood Request Cancelled",
+        `The requester ${match.requesterName} has cancelled their ${match.bloodGroup} blood request.`,
+        { matchId: match._id, requesterName: match.requesterName },
+      )
+    }
+
+    res.json({ message: "Request cancelled successfully" })
+  } catch (error) {
+    console.error("Cancel request error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+// Get requester notifications
+app.get("/api/requester/notifications", authenticateToken, checkDBConnection, async (req, res) => {
+  try {
+    if (req.user.role !== "requester") {
+      return res.status(403).json({ message: "Only requesters can view notifications" })
+    }
+
+    const notifications = await Notification.find({ userId: req.user.userId }).sort({ createdAt: -1 }).limit(50)
+
+    res.json(notifications)
+  } catch (error) {
+    console.error("Get notifications error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+// ENHANCED Admin Routes
 app.get("/api/admin/donors", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
       return res.status(403).json({ message: "Admin access required" })
     }
 
-    const donors = await User.find({ role: "donor" }).select("-password").sort({ createdAt: -1 })
+    // Only show available donors (not matched or unavailable)
+    const donors = await User.find({
+      role: "donor",
+      isAvailable: true,
+      matchStatus: { $in: ["Available"] },
+    })
+      .select("-password")
+      .sort({ createdAt: -1 })
+
     res.json(donors)
   } catch (error) {
     console.error("Get donors error:", error)
@@ -640,7 +829,11 @@ app.get("/api/admin/requests", authenticateToken, checkDBConnection, async (req,
       return res.status(403).json({ message: "Admin access required" })
     }
 
-    const requests = await Request.find().sort({ createdAt: -1 })
+    // Only show pending requests (not cancelled or completed)
+    const requests = await Request.find({
+      status: { $in: ["Pending", "Matched"] },
+    }).sort({ createdAt: -1 })
+
     res.json(requests)
   } catch (error) {
     console.error("Get requests error:", error)
@@ -674,7 +867,7 @@ app.post("/api/admin/create-matches", authenticateToken, checkDBConnection, asyn
     let matchesCreated = 0
 
     for (const request of pendingRequests) {
-      // Find compatible donors
+      // Find compatible donors (only available ones)
       const compatibleBloodGroups = getCompatibleBloodGroups(request.bloodGroup)
 
       const availableDonors = await User.find({
@@ -715,6 +908,7 @@ app.post("/api/admin/create-matches", authenticateToken, checkDBConnection, asyn
   }
 })
 
+// ENHANCED: Accept match with information exchange
 app.put("/api/admin/matches/:matchId/accept", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
@@ -727,31 +921,83 @@ app.put("/api/admin/matches/:matchId/accept", authenticateToken, checkDBConnecti
       return res.status(400).json({ message: "Invalid match ID" })
     }
 
-    // Update match status
-    const match = await Match.findByIdAndUpdate(matchId, { status: "Accepted" }, { new: true })
+    // Get match with populated user data
+    const match = await Match.findById(matchId)
+      .populate("donor", "username email phone location bloodGroup")
+      .populate("requester", "username email phone location")
+      .populate("request", "urgency description")
 
     if (!match) {
       return res.status(404).json({ message: "Match not found" })
     }
 
-    // Update user statuses
-    await User.findByIdAndUpdate(match.donor, {
-      matchStatus: "Blood group matched",
+    // Update match status and add contact information
+    const updatedMatch = await Match.findByIdAndUpdate(
+      matchId,
+      {
+        status: "Accepted",
+        donorInfo: {
+          email: match.donor.email,
+          phone: match.donor.phone || "Not provided",
+          location: match.donor.location || "Not provided",
+        },
+        requesterInfo: {
+          email: match.requester.email,
+          phone: match.requester.phone || "Not provided",
+          location: match.requester.location || "Not provided",
+          urgency: match.request.urgency,
+          description: match.request.description || "No additional details",
+        },
+      },
+      { new: true },
+    )
+
+    // Update donor status to matched/unavailable
+    await User.findByIdAndUpdate(match.donor._id, {
+      isAvailable: false,
+      matchStatus: "Matched",
     })
 
-    await User.findByIdAndUpdate(match.requester, {
-      matchStatus: "Blood group matched",
+    // Update requester status
+    await User.findByIdAndUpdate(match.requester._id, {
+      matchStatus: "Matched",
     })
 
     // Update request status
-    await Request.findByIdAndUpdate(match.request, {
+    await Request.findByIdAndUpdate(match.request._id, {
       status: "Matched",
     })
 
+    // Create notifications with contact information for both parties
+    await createNotification(
+      match.donor._id,
+      "match_accepted",
+      "Blood Match Confirmed!",
+      `Your blood donation has been matched with ${match.requesterName}. Contact details have been shared.`,
+      {
+        matchId: match._id,
+        requesterInfo: updatedMatch.requesterInfo,
+        bloodGroup: match.bloodGroup,
+        urgency: match.request.urgency,
+      },
+    )
+
+    await createNotification(
+      match.requester._id,
+      "match_accepted",
+      "Donor Found!",
+      `A donor ${match.donorName} has been found for your ${match.bloodGroup} blood request. Contact details have been shared.`,
+      {
+        matchId: match._id,
+        donorInfo: updatedMatch.donorInfo,
+        bloodGroup: match.bloodGroup,
+      },
+    )
+
     // Create history record
     const history = new History({
-      donor: match.donor,
-      requester: match.requester,
+      donor: match.donor._id,
+      requester: match.requester._id,
       donorName: match.donorName,
       requesterName: match.requesterName,
       bloodGroup: match.bloodGroup,
@@ -760,7 +1006,10 @@ app.put("/api/admin/matches/:matchId/accept", authenticateToken, checkDBConnecti
 
     await history.save()
 
-    res.json({ message: "Match accepted successfully" })
+    res.json({
+      message: "Match accepted successfully. Contact information has been shared with both parties.",
+      match: updatedMatch,
+    })
   } catch (error) {
     console.error("Accept match error:", error)
     res.status(500).json({ message: "Server error" })
