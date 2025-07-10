@@ -187,12 +187,28 @@ function DonorDashboard() {
                 <p className="matched-status">
                   🩸 You are currently matched with a requester. Check your notifications for contact details.
                 </p>
+                <p className="re-entry-info">
+                  💡 To receive new donation requests, mark yourself as available again after completing this donation.
+                </p>
+                <button onClick={updateAvailability} disabled={loading} className="toggle-btn">
+                  {loading ? "Updating..." : "Mark as Available for New Donations"}
+                </button>
               </div>
             )}
             {user?.matchStatus !== "Matched" && (
-              <button onClick={updateAvailability} disabled={loading} className="toggle-btn">
-                {loading ? "Updating..." : `Mark as ${isAvailable ? "Unavailable" : "Available"}`}
-              </button>
+              <div>
+                <button onClick={updateAvailability} disabled={loading} className="toggle-btn">
+                  {loading ? "Updating..." : `Mark as ${isAvailable ? "Unavailable" : "Available"}`}
+                </button>
+                {isAvailable && (
+                  <p className="availability-note">✅ You are visible to admins and can receive new match requests.</p>
+                )}
+                {!isAvailable && (
+                  <p className="availability-note">
+                    ⏸️ You are hidden from the donor list and won't receive new match requests.
+                  </p>
+                )}
+              </div>
             )}
           </div>
         </div>
