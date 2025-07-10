@@ -1,15 +1,16 @@
 "use client"
 
 import type React from "react"
-import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom"
-import { AuthProvider, useAuth } from "./contexts/AuthContext"
-import Navbar from "./components/Navbar"
-import Login from "./pages/Login"
-import Signup from "./pages/Signup"
-import DonorDashboard from "./pages/DonorDashboard"
-import RequesterDashboard from "./pages/RequesterDashboard"
-import AdminDashboard from "./pages/AdminDashboard"
+import { Navigate, Route, BrowserRouter as Router, Routes } from "react-router-dom"
 import "./App.css"
+import Navbar from "./components/Navbar"
+import { AuthProvider, useAuth } from "./contexts/AuthContext"
+import AdminDashboard from "./pages/AdminDashboard"
+import DonorDashboard from "./pages/DonorDashboard"
+import Login from "./pages/Login"
+import RequesterDashboard from "./pages/RequesterDashboard"
+import RoleSelection from "./pages/RoleSelection"
+import Signup from "./pages/Signup"
 
 function ProtectedRoute({ children, allowedRoles }: { children: React.ReactNode; allowedRoles: string[] }) {
   const { user, loading } = useAuth()
@@ -18,7 +19,11 @@ function ProtectedRoute({ children, allowedRoles }: { children: React.ReactNode;
     return <div className="loading">Loading...</div>
   }
 
-  if (!user || !allowedRoles.includes(user.role)) {
+  if (!user) {
+    return <Navigate to="/login" />
+  }
+
+  if (!allowedRoles.includes(user.role)) {
     return <Navigate to="/login" />
   }
 
@@ -26,15 +31,32 @@ function ProtectedRoute({ children, allowedRoles }: { children: React.ReactNode;
 }
 
 function AppRoutes() {
-  const { user } = useAuth()
+  const { user, loading } = useAuth()
+
+  if (loading) {
+    return <div className="loading">Loading...</div>
+  }
+
+  // If user is logged in but has no role, show role selection
+  if (user && !user.role) {
+    return (
+      <div className="App">
+        <Navbar />
+        <main className="main-content">
+          <RoleSelection />
+        </main>
+      </div>
+    )
+  }
 
   return (
     <div className="App">
       <Navbar />
       <main className="main-content">
         <Routes>
-          <Route path="/login" element={user ? <Navigate to={`/${user.role}-dashboard`} /> : <Login />} />
-          <Route path="/signup" element={user ? <Navigate to={`/${user.role}-dashboard`} /> : <Signup />} />
+          <Route path="/login" element={user ? <Navigate to={getDashboardRoute(user.role)} /> : <Login />} />
+          <Route path="/signup" element={user ? <Navigate to={getDashboardRoute(user.role)} /> : <Signup />} />
+          <Route path="/role-selection" element={user ? <RoleSelection /> : <Navigate to="/login" />} />
           <Route
             path="/donor-dashboard"
             element={
@@ -59,11 +81,24 @@ function AppRoutes() {
               </ProtectedRoute>
             }
           />
-          <Route path="/" element={<Navigate to="/login" />} />
+          <Route path="/" element={user ? <Navigate to={getDashboardRoute(user.role)} /> : <Navigate to="/login" />} />
         </Routes>
       </main>
     </div>
   )
+}
+
+function getDashboardRoute(role: string) {
+  switch (role) {
+    case "admin":
+      return "/admin-dashboard"
+    case "donor":
+      return "/donor-dashboard"
+    case "requester":
+      return "/requester-dashboard"
+    default:
+      return "/role-selection"
+  }
 }
 
 function App() {
