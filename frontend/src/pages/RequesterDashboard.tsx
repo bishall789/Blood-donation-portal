@@ -1,7 +1,7 @@
 "use client"
 
 import type React from "react"
-import { useState, useEffect } from "react"
+import { useEffect, useState } from "react"
 import { useAuth } from "../contexts/AuthContext"
 import "./Dashboard.css"
 
@@ -14,9 +14,20 @@ interface BloodRequest {
   createdAt: string
 }
 
+interface Notification {
+  _id: string
+  type: string
+  title: string
+  message: string
+  data: any
+  read: boolean
+  createdAt: string
+}
+
 function RequesterDashboard() {
   const { user } = useAuth()
   const [requests, setRequests] = useState<BloodRequest[]>([])
+  const [notifications, setNotifications] = useState<Notification[]>([])
   const [showForm, setShowForm] = useState(false)
   const [formData, setFormData] = useState({
     bloodGroup: "A+",
@@ -32,6 +43,7 @@ function RequesterDashboard() {
 
   useEffect(() => {
     fetchRequests()
+    fetchNotifications()
   }, [])
 
   const fetchRequests = async () => {
@@ -49,6 +61,24 @@ function RequesterDashboard() {
       }
     } catch (error) {
       console.error("Error fetching requests:", error)
+    }
+  }
+
+  const fetchNotifications = async () => {
+    try {
+      const token = localStorage.getItem("token")
+      const response = await fetch(`${API_BASE_URL}/api/requester/notifications`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setNotifications(data)
+      }
+    } catch (error) {
+      console.error("Error fetching notifications:", error)
     }
   }
 
@@ -79,6 +109,35 @@ function RequesterDashboard() {
     }
   }
 
+  const cancelRequest = async (requestId: string) => {
+    // eslint-disable-next-line no-restricted-globals
+    if (!confirm("Are you sure you want to cancel this blood request?")) {
+      return
+    }
+
+    try {
+      const token = localStorage.getItem("token")
+      const response = await fetch(`${API_BASE_URL}/api/requester/requests/${requestId}/cancel`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+
+      if (response.ok) {
+        fetchRequests()
+        fetchNotifications() // Refresh to see any new notifications
+        alert("Request cancelled successfully")
+      } else {
+        const data = await response.json()
+        alert(data.message || "Failed to cancel request")
+      }
+    } catch (error) {
+      console.error("Error cancelling request:", error)
+      alert("Error cancelling request")
+    }
+  }
+
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     setFormData({
       ...formData,
@@ -101,6 +160,38 @@ function RequesterDashboard() {
       </div>
 
       <div className="dashboard-content">
+        {/* Notifications Section */}
+        {notifications.length > 0 && (
+          <div className="card">
+            <h3>🔔 Recent Notifications</h3>
+            <div className="notifications-list">
+              {notifications.slice(0, 3).map((notification) => (
+                <div key={notification._id} className={`notification-item ${notification.type}`}>
+                  <div className="notification-content">
+                    <h4>{notification.title}</h4>
+                    <p>{notification.message}</p>
+                    {notification.data?.donorInfo && (
+                      <div className="contact-info">
+                        <h5>📞 Donor Contact Information:</h5>
+                        <p>
+                          <strong>Email:</strong> {notification.data.donorInfo.email}
+                        </p>
+                        <p>
+                          <strong>Phone:</strong> {notification.data.donorInfo.phone}
+                        </p>
+                        <p>
+                          <strong>Location:</strong> {notification.data.donorInfo.location}
+                        </p>
+                      </div>
+                    )}
+                    <small>{new Date(notification.createdAt).toLocaleString()}</small>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="card">
           <div className="card-header">
             <h3>Blood Requests</h3>
@@ -171,7 +262,18 @@ function RequesterDashboard() {
                       <strong>Date:</strong> {new Date(request.createdAt).toLocaleDateString()}
                     </p>
                   </div>
-                  <div className={`status ${request.status.toLowerCase().replace(" ", "-")}`}>{request.status}</div>
+                  <div className="request-actions">
+                    <div className={`status ${request.status.toLowerCase().replace(" ", "-")}`}>{request.status}</div>
+                    {(request.status === "Pending" || request.status === "Matched") && (
+                      <button
+                        onClick={() => cancelRequest(request._id)}
+                        className="cancel-btn"
+                        title="Cancel this request"
+                      >
+                        Cancel
+                      </button>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
