@@ -22,20 +22,72 @@ interface Notification {
   createdAt: string
 }
 
+interface PendingMatch {
+  _id: string
+  requesterName: string
+  bloodGroup: string
+  status: string
+  expiresAt: string
+  requester: {
+    username: string
+    email: string
+  }
+  request: {
+    urgency: string
+    description: string
+  }
+  donorResponse: string
+  requesterResponse: string
+}
+
+interface ActiveMatch {
+  _id: string
+  donorName: string
+  requesterName: string
+  bloodGroup: string
+  status: string
+  donorInfo: {
+    email: string
+    phone: string
+    location: string
+  }
+  requesterInfo: {
+    email: string
+    phone: string
+    location: string
+    urgency: string
+    description: string
+  }
+}
+
 function DonorDashboard() {
   const { user, updateUser } = useAuth()
   const [isAvailable, setIsAvailable] = useState(user?.isAvailable || false)
   const [history, setHistory] = useState<DonationHistory[]>([])
   const [notifications, setNotifications] = useState<Notification[]>([])
+  const [pendingMatches, setPendingMatches] = useState<PendingMatch[]>([])
+  const [activeMatches, setActiveMatches] = useState<ActiveMatch[]>([])
   const [loading, setLoading] = useState(false)
+  const [respondingTo, setRespondingTo] = useState<string | null>(null)
 
   const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:5000"
 
   useEffect(() => {
-    fetchHistory()
-    fetchUserStatus()
-    fetchNotifications()
+    fetchAllData()
+    // Refresh data every 30 seconds
+    const interval = setInterval(fetchAllData, 30000)
+    return () => clearInterval(interval)
   }, [])
+
+  const fetchAllData = async () => {
+    await Promise.all([
+      fetchHistory(),
+      fetchUserStatus(),
+      fetchNotifications(),
+      fetchPendingMatches(),
+      fetchActiveMatches(),
+    ])
+  }
 
   const fetchUserStatus = async () => {
     try {
@@ -92,6 +144,42 @@ function DonorDashboard() {
     }
   }
 
+  const fetchPendingMatches = async () => {
+    try {
+      const token = localStorage.getItem("token")
+      const response = await fetch(`${API_BASE_URL}/api/matches/pending`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setPendingMatches(data)
+      }
+    } catch (error) {
+      console.error("Error fetching pending matches:", error)
+    }
+  }
+
+  const fetchActiveMatches = async () => {
+    try {
+      const token = localStorage.getItem("token")
+      const response = await fetch(`${API_BASE_URL}/api/matches/active`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setActiveMatches(data)
+      }
+    } catch (error) {
+      console.error("Error fetching active matches:", error)
+    }
+  }
+
   const updateAvailability = async () => {
     setLoading(true)
     try {
@@ -108,13 +196,55 @@ function DonorDashboard() {
       if (response.ok) {
         setIsAvailable(!isAvailable)
         updateUser({ isAvailable: !isAvailable })
-        fetchNotifications() // Refresh notifications after status change
+        fetchAllData() // Refresh all data after availability change
       }
     } catch (error) {
       console.error("Error updating availability:", error)
     } finally {
       setLoading(false)
     }
+  }
+
+  const respondToMatch = async (matchId: string, response: "accepted" | "rejected") => {
+    setRespondingTo(matchId)
+    try {
+      const token = localStorage.getItem("token")
+      const apiResponse = await fetch(`${API_BASE_URL}/api/matches/${matchId}/respond`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ response }),
+      })
+
+      if (apiResponse.ok) {
+        const data = await apiResponse.json()
+        alert(data.message)
+        fetchAllData() // Refresh all data
+      } else {
+        const errorData = await apiResponse.json()
+        alert(errorData.message || "Failed to respond to match")
+      }
+    } catch (error) {
+      console.error("Error responding to match:", error)
+      alert("Error responding to match")
+    } finally {
+      setRespondingTo(null)
+    }
+  }
+
+  const getTimeRemaining = (expiresAt: string) => {
+    const now = new Date()
+    const expiry = new Date(expiresAt)
+    const diff = expiry.getTime() - now.getTime()
+
+    if (diff <= 0) return "Expired"
+
+    const hours = Math.floor(diff / (1000 * 60 * 60))
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
+
+    return `${hours}h ${minutes}m remaining`
   }
 
   return (
@@ -132,39 +262,107 @@ function DonorDashboard() {
       </div>
 
       <div className="dashboard-content">
-        {/* Notifications Section */}
+        {/* Pending Match Requests */}
+        {pendingMatches.length > 0 && (
+          <div className="card">
+            <h3>🩸 Pending Match Requests ({pendingMatches.length})</h3>
+            <div className="match-requests-list">
+              {pendingMatches.map((match) => (
+                <div key={match._id} className="match-request-item">
+                  <div className="match-info">
+                    <h4>
+                      {match.requesterName} needs {match.bloodGroup} blood
+                    </h4>
+                    <p>
+                      <strong>Urgency:</strong>{" "}
+                      <span className={`urgency ${match.request.urgency}`}>{match.request.urgency}</span>
+                    </p>
+                    <p>
+                      <strong>Details:</strong> {match.request.description || "No additional details"}
+                    </p>
+                    <p>
+                      <strong>Time:</strong> <span className="time-remaining">{getTimeRemaining(match.expiresAt)}</span>
+                    </p>
+                    {match.requesterResponse === "accepted" && (
+                      <p className="other-response">✅ Requester has already accepted</p>
+                    )}
+                  </div>
+                  <div className="match-actions">
+                    {match.donorResponse === "pending" ? (
+                      <div className="response-buttons">
+                        <button
+                          onClick={() => respondToMatch(match._id, "accepted")}
+                          disabled={respondingTo === match._id}
+                          className="accept-btn"
+                        >
+                          {respondingTo === match._id ? "Accepting..." : "Accept"}
+                        </button>
+                        <button
+                          onClick={() => respondToMatch(match._id, "rejected")}
+                          disabled={respondingTo === match._id}
+                          className="reject-btn"
+                        >
+                          {respondingTo === match._id ? "Rejecting..." : "Reject"}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className={`response-status ${match.donorResponse}`}>
+                        {match.donorResponse === "accepted" ? "✅ You accepted" : "❌ You rejected"}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Active Matches */}
+        {activeMatches.length > 0 && (
+          <div className="card">
+            <h3>🎉 Active Matches ({activeMatches.length})</h3>
+            <div className="active-matches-list">
+              {activeMatches.map((match) => (
+                <div key={match._id} className="active-match-item">
+                  <div className="match-header">
+                    <h4>Match with {match.requesterName}</h4>
+                    <span className="blood-group">{match.bloodGroup}</span>
+                  </div>
+                  <div className="contact-info">
+                    <h5>📞 Requester Contact Information:</h5>
+                    <p>
+                      <strong>Email:</strong> {match.requesterInfo.email}
+                    </p>
+                    <p>
+                      <strong>Phone:</strong> {match.requesterInfo.phone}
+                    </p>
+                    <p>
+                      <strong>Location:</strong> {match.requesterInfo.location}
+                    </p>
+                    <p>
+                      <strong>Urgency:</strong>{" "}
+                      <span className={`urgency ${match.requesterInfo.urgency}`}>{match.requesterInfo.urgency}</span>
+                    </p>
+                    <p>
+                      <strong>Details:</strong> {match.requesterInfo.description}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Recent Notifications */}
         {notifications.length > 0 && (
           <div className="card">
             <h3>🔔 Recent Notifications</h3>
             <div className="notifications-list">
-              {notifications.slice(0, 3).map((notification) => (
+              {notifications.slice(0, 5).map((notification) => (
                 <div key={notification._id} className={`notification-item ${notification.type}`}>
                   <div className="notification-content">
                     <h4>{notification.title}</h4>
                     <p>{notification.message}</p>
-                    {notification.data?.requesterInfo && (
-                      <div className="contact-info">
-                        <h5>🏥 Requester Contact Information:</h5>
-                        <p>
-                          <strong>Email:</strong> {notification.data.requesterInfo.email}
-                        </p>
-                        <p>
-                          <strong>Phone:</strong> {notification.data.requesterInfo.phone}
-                        </p>
-                        <p>
-                          <strong>Location:</strong> {notification.data.requesterInfo.location}
-                        </p>
-                        <p>
-                          <strong>Urgency:</strong>{" "}
-                          <span className={`urgency ${notification.data.requesterInfo.urgency}`}>
-                            {notification.data.requesterInfo.urgency}
-                          </span>
-                        </p>
-                        <p>
-                          <strong>Details:</strong> {notification.data.requesterInfo.description}
-                        </p>
-                      </div>
-                    )}
                     <small>{new Date(notification.createdAt).toLocaleString()}</small>
                   </div>
                 </div>
@@ -173,6 +371,7 @@ function DonorDashboard() {
           </div>
         )}
 
+        {/* Availability Status */}
         <div className="card">
           <h3>Availability Status</h3>
           <div className="availability-section">
@@ -185,7 +384,7 @@ function DonorDashboard() {
             {user?.matchStatus === "Matched" && (
               <div className="match-info">
                 <p className="matched-status">
-                  🩸 You are currently matched with a requester. Check your notifications for contact details.
+                  🩸 You are currently matched with a requester. Check your active matches above for contact details.
                 </p>
                 <p className="re-entry-info">
                   💡 To receive new donation requests, mark yourself as available again after completing this donation.
@@ -201,11 +400,13 @@ function DonorDashboard() {
                   {loading ? "Updating..." : `Mark as ${isAvailable ? "Unavailable" : "Available"}`}
                 </button>
                 {isAvailable && (
-                  <p className="availability-note">✅ You are visible to admins and can receive new match requests.</p>
+                  <p className="availability-note">
+                    ✅ You are visible to the system and will receive automatic match requests.
+                  </p>
                 )}
                 {!isAvailable && (
                   <p className="availability-note">
-                    ⏸️ You are hidden from the donor list and won't receive new match requests.
+                    ⏸️ You are hidden from the system and won't receive new match requests.
                   </p>
                 )}
               </div>
@@ -213,6 +414,7 @@ function DonorDashboard() {
           </div>
         </div>
 
+        {/* Donation History */}
         <div className="card">
           <h3>Donation History</h3>
           {history.length === 0 ? (
