@@ -88,7 +88,13 @@ function RequesterDashboard() {
 
     try {
       const token = localStorage.getItem("token")
-      const response = await fetch(`${API_BASE_URL}/api/requester/request`, {
+      // Use different endpoint based on user status
+      const endpoint =
+        user?.matchStatus === "Matched"
+          ? `${API_BASE_URL}/api/requester/new-request`
+          : `${API_BASE_URL}/api/requester/request`
+
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -98,12 +104,19 @@ function RequesterDashboard() {
       })
 
       if (response.ok) {
+        const data = await response.json()
         setShowForm(false)
         setFormData({ bloodGroup: "A+", urgency: "medium", description: "" })
         fetchRequests()
+        // Show success message
+        alert(data.message || "Request submitted successfully!")
+      } else {
+        const errorData = await response.json()
+        alert(errorData.message || "Failed to submit request")
       }
     } catch (error) {
       console.error("Error creating request:", error)
+      alert("Error submitting request. Please try again.")
     } finally {
       setLoading(false)
     }
@@ -194,14 +207,29 @@ function RequesterDashboard() {
 
         <div className="card">
           <div className="card-header">
-            <h3>Blood Requests</h3>
+            <h3>{user?.matchStatus === "Matched" ? "Create New Blood Request" : "Blood Requests"}</h3>
             <button onClick={() => setShowForm(!showForm)} className="primary-btn">
-              {showForm ? "Cancel" : "New Request"}
+              {showForm ? "Cancel" : user?.matchStatus === "Matched" ? "New Request" : "New Request"}
             </button>
           </div>
 
+          {user?.matchStatus === "Matched" && !showForm && (
+            <div className="match-info">
+              <p className="matched-status">
+                🩸 You are currently matched with a donor. Check your notifications for contact details.
+              </p>
+              <p className="re-entry-info">💡 You can create a new blood request if you need additional donations.</p>
+            </div>
+          )}
+
           {showForm && (
             <form onSubmit={handleSubmit} className="request-form">
+              {user?.matchStatus === "Matched" && (
+                <div className="form-notice">
+                  <p>📋 Creating a new request will make you available for additional matches.</p>
+                </div>
+              )}
+              {/* Rest of the form remains the same */}
               <div className="form-group">
                 <label htmlFor="bloodGroup">Blood Group Needed</label>
                 <select id="bloodGroup" name="bloodGroup" value={formData.bloodGroup} onChange={handleChange}>
@@ -234,7 +262,7 @@ function RequesterDashboard() {
                 />
               </div>
               <button type="submit" disabled={loading} className="submit-btn">
-                {loading ? "Submitting..." : "Submit Request"}
+                {loading ? "Submitting..." : user?.matchStatus === "Matched" ? "Create New Request" : "Submit Request"}
               </button>
             </form>
           )}
