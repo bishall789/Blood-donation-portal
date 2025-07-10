@@ -17,20 +17,50 @@ app.use(
 app.use(express.json({ limit: "10mb" }))
 app.use(express.urlencoded({ extended: true, limit: "10mb" }))
 
-// MongoDB connection with better error handling
+// MongoDB connection with multiple fallback options
 const connectDB = async () => {
-  try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/blooddonation", {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    })
-    console.log(`MongoDB Connected: ${conn.connection.host}`)
-  } catch (error) {
-    console.error("MongoDB connection error:", error)
-    process.exit(1)
+  const mongoOptions = {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+    serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
+    socketTimeoutMS: 45000, // Close sockets after 45s of inactivity
   }
+
+  // Try different MongoDB connection strings
+  const connectionStrings = [
+    process.env.MONGODB_URI,
+    "mongodb://127.0.0.1:27017/blooddonation", // IPv4 instead of localhost
+    "mongodb://localhost:27017/blooddonation",
+    "mongodb://0.0.0.0:27017/blooddonation",
+  ].filter(Boolean) // Remove undefined values
+
+  for (const connectionString of connectionStrings) {
+    try {
+      console.log(`Attempting to connect to: ${connectionString}`)
+      const conn = await mongoose.connect(connectionString, mongoOptions)
+      console.log(`✅ MongoDB Connected Successfully: ${conn.connection.host}:${conn.connection.port}`)
+      console.log(`📊 Database: ${conn.connection.name}`)
+      return conn
+    } catch (error) {
+      console.log(`❌ Failed to connect to: ${connectionString}`)
+      console.log(`Error: ${error.message}`)
+      continue
+    }
+  }
+
+  console.error("🚨 Could not connect to MongoDB with any connection string")
+  console.log("\n📋 Troubleshooting Steps:")
+  console.log("1. Check if MongoDB is running: mongosh --eval 'db.runCommand({ping: 1})'")
+  console.log("2. Start MongoDB service: net start MongoDB (Windows) or brew services start mongodb-community (Mac)")
+  console.log("3. Check MongoDB status: mongosh --eval 'db.adminCommand({listCollections: 1})'")
+  console.log("4. Verify MongoDB is listening on port 27017")
+
+  // Don't exit the process, let it run without DB for now
+  console.log("\n⚠️  Server will continue running without database connection")
+  console.log("🔧 Fix MongoDB connection and restart the server")
 }
 
+// Connect to MongoDB
 connectDB()
 
 // User Schema - Updated to allow flexible roles
@@ -89,6 +119,17 @@ const History = mongoose.model("History", historySchema)
 // JWT Secret
 const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-this"
 
+// Middleware to check database connection
+const checkDBConnection = (req, res, next) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({
+      message: "Database connection unavailable. Please check MongoDB service.",
+      dbStatus: "disconnected",
+    })
+  }
+  next()
+}
+
 // Middleware to verify JWT token
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers["authorization"]
@@ -125,6 +166,11 @@ const getCompatibleBloodGroups = (requestedBloodGroup) => {
 // Create default admin user
 const createDefaultAdmin = async () => {
   try {
+    if (mongoose.connection.readyState !== 1) {
+      console.log("⏳ Waiting for database connection to create admin user...")
+      return
+    }
+
     const adminExists = await User.findOne({ username: "admin" })
     if (!adminExists) {
       const hashedPassword = await bcrypt.hash("admin123", 12)
@@ -136,16 +182,27 @@ const createDefaultAdmin = async () => {
         bloodGroup: "O+",
       })
       await admin.save()
-      console.log("Default admin user created - Username: admin, Password: admin123")
+      console.log("✅ Default admin user created - Username: admin, Password: admin123")
+    } else {
+      console.log("ℹ️  Admin user already exists")
     }
   } catch (error) {
-    console.error("Error creating default admin:", error)
+    console.error("❌ Error creating default admin:", error.message)
   }
 }
 
-// Initialize default admin after DB connection
-mongoose.connection.once("open", () => {
+// Initialize default admin when DB connects
+mongoose.connection.on("connected", () => {
+  console.log("🔗 Mongoose connected to MongoDB")
   createDefaultAdmin()
+})
+
+mongoose.connection.on("error", (err) => {
+  console.error("❌ Mongoose connection error:", err.message)
+})
+
+mongoose.connection.on("disconnected", () => {
+  console.log("🔌 Mongoose disconnected from MongoDB")
 })
 
 // Validation middleware
@@ -177,7 +234,7 @@ const validateSignup = (req, res, next) => {
 }
 
 // Auth Routes
-app.post("/api/auth/signup", validateSignup, async (req, res) => {
+app.post("/api/auth/signup", checkDBConnection, validateSignup, async (req, res) => {
   try {
     const { username, email, password, bloodGroup } = req.body
 
@@ -234,7 +291,7 @@ app.post("/api/auth/signup", validateSignup, async (req, res) => {
   }
 })
 
-app.post("/api/auth/login", async (req, res) => {
+app.post("/api/auth/login", checkDBConnection, async (req, res) => {
   try {
     const { username, password } = req.body
 
@@ -279,7 +336,7 @@ app.post("/api/auth/login", async (req, res) => {
   }
 })
 
-app.get("/api/auth/profile", authenticateToken, async (req, res) => {
+app.get("/api/auth/profile", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     const user = await User.findById(req.user.userId).select("-password")
     if (!user) {
@@ -304,7 +361,7 @@ app.get("/api/auth/profile", authenticateToken, async (req, res) => {
 })
 
 // New route to update user role
-app.put("/api/auth/update-role", authenticateToken, async (req, res) => {
+app.put("/api/auth/update-role", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     const { role, bloodGroup } = req.body
 
@@ -357,7 +414,7 @@ app.put("/api/auth/update-role", authenticateToken, async (req, res) => {
 })
 
 // Donor Routes
-app.put("/api/donor/availability", authenticateToken, async (req, res) => {
+app.put("/api/donor/availability", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "donor") {
       return res.status(403).json({ message: "Only donors can update availability" })
@@ -378,7 +435,7 @@ app.put("/api/donor/availability", authenticateToken, async (req, res) => {
   }
 })
 
-app.get("/api/donor/history", authenticateToken, async (req, res) => {
+app.get("/api/donor/history", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "donor") {
       return res.status(403).json({ message: "Only donors can view donation history" })
@@ -394,7 +451,7 @@ app.get("/api/donor/history", authenticateToken, async (req, res) => {
 })
 
 // Requester Routes
-app.post("/api/requester/request", authenticateToken, async (req, res) => {
+app.post("/api/requester/request", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "requester") {
       return res.status(403).json({ message: "Only requesters can create blood requests" })
@@ -433,7 +490,7 @@ app.post("/api/requester/request", authenticateToken, async (req, res) => {
   }
 })
 
-app.get("/api/requester/requests", authenticateToken, async (req, res) => {
+app.get("/api/requester/requests", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "requester") {
       return res.status(403).json({ message: "Only requesters can view their requests" })
@@ -449,7 +506,7 @@ app.get("/api/requester/requests", authenticateToken, async (req, res) => {
 })
 
 // Admin Routes
-app.get("/api/admin/donors", authenticateToken, async (req, res) => {
+app.get("/api/admin/donors", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
       return res.status(403).json({ message: "Admin access required" })
@@ -463,7 +520,7 @@ app.get("/api/admin/donors", authenticateToken, async (req, res) => {
   }
 })
 
-app.get("/api/admin/requests", authenticateToken, async (req, res) => {
+app.get("/api/admin/requests", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
       return res.status(403).json({ message: "Admin access required" })
@@ -477,7 +534,7 @@ app.get("/api/admin/requests", authenticateToken, async (req, res) => {
   }
 })
 
-app.get("/api/admin/matches", authenticateToken, async (req, res) => {
+app.get("/api/admin/matches", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
       return res.status(403).json({ message: "Admin access required" })
@@ -491,7 +548,7 @@ app.get("/api/admin/matches", authenticateToken, async (req, res) => {
   }
 })
 
-app.post("/api/admin/create-matches", authenticateToken, async (req, res) => {
+app.post("/api/admin/create-matches", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
       return res.status(403).json({ message: "Admin access required" })
@@ -544,7 +601,7 @@ app.post("/api/admin/create-matches", authenticateToken, async (req, res) => {
   }
 })
 
-app.put("/api/admin/matches/:matchId/accept", authenticateToken, async (req, res) => {
+app.put("/api/admin/matches/:matchId/accept", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
       return res.status(403).json({ message: "Admin access required" })
@@ -598,11 +655,21 @@ app.put("/api/admin/matches/:matchId/accept", authenticateToken, async (req, res
 
 // Health check endpoint
 app.get("/api/health", (req, res) => {
+  const dbStatus = mongoose.connection.readyState
+  const dbStatusText = {
+    0: "disconnected",
+    1: "connected",
+    2: "connecting",
+    3: "disconnecting",
+  }
+
   res.json({
     status: "OK",
     message: "Blood Donation API is running",
     timestamp: new Date().toISOString(),
-    mongodb: mongoose.connection.readyState === 1 ? "Connected" : "Disconnected",
+    mongodb: dbStatusText[dbStatus] || "unknown",
+    dbReadyState: dbStatus,
+    environment: process.env.NODE_ENV || "development",
   })
 })
 
@@ -620,8 +687,10 @@ app.use("*", (req, res) => {
 const PORT = process.env.PORT || 5000
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`)
-  console.log(`Health check: http://localhost:${PORT}/api/health`)
+  console.log(`🚀 Server running on port ${PORT}`)
+  console.log(`🔍 Health check: http://localhost:${PORT}/api/health`)
+  console.log(`🌐 API Base URL: http://localhost:${PORT}/api`)
+  console.log(`📊 MongoDB Status: ${mongoose.connection.readyState === 1 ? "✅ Connected" : "❌ Disconnected"}`)
 })
 
 module.exports = app
