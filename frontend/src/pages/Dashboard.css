@@ -485,3 +485,90 @@
     font-size: 0.8rem;
   }
 }
+
+.re-entry-info {
+  color: #6b7280;
+  font-size: 0.9rem;
+  margin: 0.5rem 0;
+  font-style: italic;
+}
+
+.availability-note {
+  color: #6b7280;
+  font-size: 0.9rem;
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+  background-color: #f9fafb;
+  border-radius: 4px;
+  border-left: 3px solid #d1d5db;
+}
+
+.availability-note.available {
+  background-color: #ecfdf5;
+  border-left-color: #10b981;
+  color: #065f46;
+}
+
+.availability-note.unavailable {
+  background-color: #fef2f2;
+  border-left-color: #ef4444;
+  color: #991b1b;
+}
+
+.form-notice {
+  background-color: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.form-notice p {
+  margin: 0;
+  color: #1e40af;
+  font-size: 0.9rem;
+}
+
+.match-info .re-entry-info {
+  background-color: rgba(255, 255, 255, 0.8);
+  padding: 0.5rem;
+  border-radius: 4px;
+  margin: 0.5rem 0;
+  border-left: 3px solid #3b82f6;
+}
+
+/* Enhanced toggle button for re-entry */
+.toggle-btn.re-entry {
+  background-color: #3b82f6;
+  margin-top: 0.5rem;
+}
+
+.toggle-btn.re-entry:hover:not(:disabled) {
+  background-color: #2563eb;
+}
+
+/* Status indicators */
+.status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-radius: 20px;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.status-indicator.available {
+  background-color: #d1fae5;
+  color: #065f46;
+}
+
+.status-indicator.matched {
+  background-color: #fef3c7;
+  color: #92400e;
+}
+
+.status-indicator.unavailable {
+  background-color: #fee2e2;
+  color: #991b1b;
+}
