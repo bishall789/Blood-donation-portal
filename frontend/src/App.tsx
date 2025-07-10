@@ -23,7 +23,7 @@ function ProtectedRoute({ children, allowedRoles }: { children: React.ReactNode;
     return <Navigate to="/login" />
   }
 
-  if (!allowedRoles.includes(user.role)) {
+  if (!user.role || !allowedRoles.includes(user.role)) {
     return <Navigate to="/login" />
   }
 
@@ -88,7 +88,7 @@ function AppRoutes() {
   )
 }
 
-function getDashboardRoute(role: string) {
+function getDashboardRoute(role: string | null) {
   switch (role) {
     case "admin":
       return "/admin-dashboard"
@@ -104,7 +104,12 @@ function getDashboardRoute(role: string) {
 function App() {
   return (
     <AuthProvider>
-      <Router>
+      <Router
+        future={{
+          v7_startTransition: true,
+          v7_relativeSplatPath: true,
+        }}
+      >
         <AppRoutes />
       </Router>
     </AuthProvider>

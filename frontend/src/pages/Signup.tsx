@@ -15,6 +15,7 @@ function Signup() {
     bloodGroup: "A+",
   })
   const [loading, setLoading] = useState(false)
+  const [validationError, setValidationError] = useState<string | null>(null)
   const { signup, error, clearError } = useAuth()
 
   const bloodGroups = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"]
@@ -25,9 +26,12 @@ function Signup() {
       [e.target.name]: e.target.value,
     })
     if (error) clearError()
+    if (validationError) setValidationError(null)
   }
 
   const validateForm = () => {
+    console.log("🔍 Validating form data:", { ...formData, password: "[HIDDEN]", confirmPassword: "[HIDDEN]" })
+
     if (!formData.username.trim()) {
       return "Username is required"
     }
@@ -55,17 +59,33 @@ function Signup() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    console.log("📝 Form submitted!")
 
     const validationError = validateForm()
     if (validationError) {
+      console.log("❌ Validation failed:", validationError)
+      setValidationError(validationError)
       return
     }
 
+    console.log("✅ Validation passed, attempting signup...")
     setLoading(true)
-    const success = await signup(formData)
-    setLoading(false)
+    setValidationError(null)
 
-    // If signup successful, user will be redirected by App.tsx
+    try {
+      const success = await signup(formData)
+      console.log("📡 Signup result:", success)
+
+      if (!success) {
+        console.log("❌ Signup failed")
+      } else {
+        console.log("✅ Signup successful!")
+      }
+    } catch (err) {
+      console.error("💥 Signup error:", err)
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
@@ -85,6 +105,7 @@ function Signup() {
               onChange={handleChange}
               placeholder="Enter your username"
               required
+              disabled={loading}
             />
           </div>
 
@@ -98,6 +119,7 @@ function Signup() {
               onChange={handleChange}
               placeholder="Enter your email"
               required
+              disabled={loading}
             />
           </div>
 
@@ -111,6 +133,7 @@ function Signup() {
               onChange={handleChange}
               placeholder="Enter your password (min 6 characters)"
               required
+              disabled={loading}
             />
           </div>
 
@@ -124,12 +147,19 @@ function Signup() {
               onChange={handleChange}
               placeholder="Confirm your password"
               required
+              disabled={loading}
             />
           </div>
 
           <div className="form-group">
             <label htmlFor="bloodGroup">Blood Group *</label>
-            <select id="bloodGroup" name="bloodGroup" value={formData.bloodGroup} onChange={handleChange}>
+            <select
+              id="bloodGroup"
+              name="bloodGroup"
+              value={formData.bloodGroup}
+              onChange={handleChange}
+              disabled={loading}
+            >
               {bloodGroups.map((group) => (
                 <option key={group} value={group}>
                   {group}
@@ -142,7 +172,7 @@ function Signup() {
             <p>ℹ️ After signup, you can choose to be a donor, requester, or both!</p>
           </div>
 
-          {error && <div className="error-message">{error}</div>}
+          {(validationError || error) && <div className="error-message">{validationError || error}</div>}
 
           <button type="submit" disabled={loading} className="auth-btn">
             {loading ? "Creating Account..." : "Create Account"}
@@ -152,6 +182,17 @@ function Signup() {
         <p className="auth-link">
           Already have an account? <Link to="/login">Sign in</Link>
         </p>
+
+        {/* Debug info - remove in production */}
+        <div style={{ marginTop: "20px", padding: "10px", backgroundColor: "#f0f0f0", fontSize: "12px" }}>
+          <strong>Debug Info:</strong>
+          <br />
+          Loading: {loading ? "Yes" : "No"}
+          <br />
+          Form Valid: {validateForm() ? "No" : "Yes"}
+          <br />
+          API URL: {process.env.REACT_APP_API_URL || "http://localhost:5000"}
+        </div>
       </div>
     </div>
   )

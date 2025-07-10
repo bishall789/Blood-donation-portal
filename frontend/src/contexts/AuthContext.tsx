@@ -6,7 +6,7 @@ interface User {
   id: string
   username: string
   email: string
-  role: "donor" | "requester" | "admin"
+  role: "donor" | "requester" | "admin" | null
   bloodGroup?: string
   isAvailable?: boolean
   matchStatus?: string
@@ -54,6 +54,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const fetchUserProfile = async (token: string) => {
     try {
+      console.log("👤 Fetching user profile...")
       const response = await fetch(`${API_BASE_URL}/api/auth/profile`, {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -63,14 +64,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (response.ok) {
         const userData = await response.json()
+        console.log("✅ User profile fetched:", userData)
         setUser(userData)
         setError(null)
       } else {
+        console.log("❌ Profile fetch failed, removing token")
         localStorage.removeItem("token")
         setError("Session expired. Please login again.")
       }
     } catch (error) {
-      console.error("Error fetching user profile:", error)
+      console.error("💥 Error fetching user profile:", error)
       localStorage.removeItem("token")
       setError("Network error. Please check your connection.")
     } finally {
@@ -83,6 +86,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setError(null)
       setLoading(true)
 
+      console.log("🔑 Attempting login for:", username)
+
       const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
         method: "POST",
         headers: {
@@ -92,18 +97,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
 
       const data = await response.json()
+      console.log("📡 Login response:", { status: response.status, success: response.ok })
 
       if (response.ok) {
         localStorage.setItem("token", data.token)
         setUser(data.user)
         setError(null)
+        console.log("✅ Login successful")
         return true
       } else {
+        console.log("❌ Login failed:", data.message)
         setError(data.message || "Login failed")
         return false
       }
     } catch (error) {
-      console.error("Login error:", error)
+      console.error("💥 Login error:", error)
       setError("Network error. Please check your connection.")
       return false
     } finally {
@@ -116,33 +124,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setError(null)
       setLoading(true)
 
+      console.log("📝 Starting signup process for:", userData.username)
+
+      const signupData = {
+        username: userData.username.trim(),
+        email: userData.email.trim().toLowerCase(),
+        password: userData.password,
+        bloodGroup: userData.bloodGroup,
+      }
+
+      console.log("📤 Sending signup request to:", `${API_BASE_URL}/api/auth/signup`)
+      console.log("📤 Signup data:", { ...signupData, password: "[HIDDEN]" })
+
       const response = await fetch(`${API_BASE_URL}/api/auth/signup`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          username: userData.username.trim(),
-          email: userData.email.trim().toLowerCase(),
-          password: userData.password,
-          bloodGroup: userData.bloodGroup,
-        }),
+        body: JSON.stringify(signupData),
       })
 
+      console.log("📡 Signup response status:", response.status)
+      console.log("📡 Signup response ok:", response.ok)
+
       const data = await response.json()
+      console.log("📡 Signup response data:", data)
 
       if (response.ok) {
         localStorage.setItem("token", data.token)
         setUser(data.user)
         setError(null)
+        console.log("✅ Signup successful, user:", data.user)
         return true
       } else {
+        console.log("❌ Signup failed:", data.message)
         setError(data.message || "Signup failed")
         return false
       }
     } catch (error) {
-      console.error("Signup error:", error)
-      setError("Network error. Please check your connection.")
+      console.error("💥 Signup error:", error)
+      setError("Network error. Please check your connection and try again.")
       return false
     } finally {
       setLoading(false)
@@ -153,6 +174,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       setError(null)
       const token = localStorage.getItem("token")
+
+      console.log("🔄 Updating user role to:", role)
 
       const response = await fetch(`${API_BASE_URL}/api/auth/update-role`, {
         method: "PUT",
@@ -166,15 +189,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const data = await response.json()
 
       if (response.ok) {
+        // Update token if provided
+        if (data.token) {
+          localStorage.setItem("token", data.token)
+        }
         setUser(data.user)
         setError(null)
+        console.log("✅ Role updated successfully")
         return true
       } else {
+        console.log("❌ Role update failed:", data.message)
         setError(data.message || "Failed to update role")
         return false
       }
     } catch (error) {
-      console.error("Update role error:", error)
+      console.error("💥 Update role error:", error)
       setError("Network error. Please try again.")
       return false
     }
@@ -184,6 +213,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem("token")
     setUser(null)
     setError(null)
+    console.log("👋 User logged out")
   }
 
   const updateUser = (userData: Partial<User>) => {

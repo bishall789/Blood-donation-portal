@@ -1,0 +1,16 @@
+{
+  "name": "database-scripts",
+  "version": "1.0.0",
+  "description": "Database management scripts",
+  "main": "reset-database.js",
+  "scripts": {
+    "reset": "node reset-database.js",
+    "seed": "node seed-data.js",
+    "reset-and-seed": "node reset-database.js && node seed-data.js"
+  },
+  "dependencies": {
+    "mongoose": "^7.5.0",
+    "dotenv": "^16.3.1",
+    "bcryptjs": "^2.4.3"
+  }
+}
