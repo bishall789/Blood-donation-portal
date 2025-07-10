@@ -22,17 +22,17 @@ const connectDB = async () => {
   const mongoOptions = {
     useNewUrlParser: true,
     useUnifiedTopology: true,
-    serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
-    socketTimeoutMS: 45000, // Close sockets after 45s of inactivity
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
   }
 
   // Try different MongoDB connection strings
   const connectionStrings = [
     process.env.MONGODB_URI,
-    "mongodb://127.0.0.1:27017/blooddonation", // IPv4 instead of localhost
+    "mongodb://127.0.0.1:27017/blooddonation",
     "mongodb://localhost:27017/blooddonation",
     "mongodb://0.0.0.0:27017/blooddonation",
-  ].filter(Boolean) // Remove undefined values
+  ].filter(Boolean)
 
   for (const connectionString of connectionStrings) {
     try {
@@ -49,32 +49,73 @@ const connectDB = async () => {
   }
 
   console.error("🚨 Could not connect to MongoDB with any connection string")
-  console.log("\n📋 Troubleshooting Steps:")
-  console.log("1. Check if MongoDB is running: mongosh --eval 'db.runCommand({ping: 1})'")
-  console.log("2. Start MongoDB service: net start MongoDB (Windows) or brew services start mongodb-community (Mac)")
-  console.log("3. Check MongoDB status: mongosh --eval 'db.adminCommand({listCollections: 1})'")
-  console.log("4. Verify MongoDB is listening on port 27017")
-
-  // Don't exit the process, let it run without DB for now
-  console.log("\n⚠️  Server will continue running without database connection")
-  console.log("🔧 Fix MongoDB connection and restart the server")
+  process.exit(1)
 }
 
 // Connect to MongoDB
 connectDB()
 
-// User Schema - Updated to allow flexible roles
+// User Schema - COMPLETELY FIXED to handle null roles properly
 const userSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true, trim: true },
-  email: { type: String, required: true, unique: true, trim: true, lowercase: true },
-  password: { type: String, required: true, minlength: 6 },
-  role: { type: String, enum: ["donor", "requester", "admin"], default: null },
-  bloodGroup: { type: String, required: true, enum: ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"] },
-  isAvailable: { type: Boolean, default: true },
-  matchStatus: { type: String, default: "Available" },
-  isDonor: { type: Boolean, default: false },
-  isRequester: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now },
+  username: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+  },
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    lowercase: true,
+  },
+  password: {
+    type: String,
+    required: true,
+    minlength: 6,
+  },
+  role: {
+    type: String,
+    enum: {
+      values: ["donor", "requester", "admin"],
+      message: "{VALUE} is not a valid role",
+    },
+    default: undefined, // Use undefined instead of null
+    required: false,
+    validate: {
+      validator: (v) => {
+        // Allow undefined, null, or valid enum values
+        return v === undefined || v === null || ["donor", "requester", "admin"].includes(v)
+      },
+      message: "Role must be donor, requester, admin, or empty",
+    },
+  },
+  bloodGroup: {
+    type: String,
+    required: true,
+    enum: ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"],
+  },
+  isAvailable: {
+    type: Boolean,
+    default: true,
+  },
+  matchStatus: {
+    type: String,
+    default: "Available",
+  },
+  isDonor: {
+    type: Boolean,
+    default: false,
+  },
+  isRequester: {
+    type: Boolean,
+    default: false,
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
 })
 
 // Blood Request Schema
@@ -205,31 +246,44 @@ mongoose.connection.on("disconnected", () => {
   console.log("🔌 Mongoose disconnected from MongoDB")
 })
 
-// Validation middleware
+// Enhanced validation middleware
 const validateSignup = (req, res, next) => {
   const { username, email, password, bloodGroup } = req.body
 
+  console.log("📝 Signup validation - Received data:", {
+    username,
+    email,
+    bloodGroup,
+    passwordLength: password?.length,
+  })
+
   if (!username || !email || !password || !bloodGroup) {
+    console.log("❌ Validation failed: Missing required fields")
     return res.status(400).json({ message: "Username, email, password, and blood group are required" })
   }
 
   if (username.trim().length < 3) {
+    console.log("❌ Validation failed: Username too short")
     return res.status(400).json({ message: "Username must be at least 3 characters long" })
   }
 
   if (password.length < 6) {
+    console.log("❌ Validation failed: Password too short")
     return res.status(400).json({ message: "Password must be at least 6 characters long" })
   }
 
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
   if (!emailRegex.test(email)) {
+    console.log("❌ Validation failed: Invalid email format")
     return res.status(400).json({ message: "Please enter a valid email address" })
   }
 
   if (!["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].includes(bloodGroup)) {
+    console.log("❌ Validation failed: Invalid blood group")
     return res.status(400).json({ message: "Invalid blood group" })
   }
 
+  console.log("✅ Validation passed")
   next()
 }
 
@@ -238,62 +292,92 @@ app.post("/api/auth/signup", checkDBConnection, validateSignup, async (req, res)
   try {
     const { username, email, password, bloodGroup } = req.body
 
+    console.log("🔐 Processing signup for:", { username, email, bloodGroup })
+
     // Check if user already exists
     const existingUser = await User.findOne({
       $or: [{ username: username.trim() }, { email: email.trim().toLowerCase() }],
     })
 
     if (existingUser) {
-      return res.status(400).json({
-        message: existingUser.username === username.trim() ? "Username already exists" : "Email already exists",
-      })
+      const message = existingUser.username === username.trim() ? "Username already exists" : "Email already exists"
+      console.log("❌ Signup failed:", message)
+      return res.status(400).json({ message })
     }
 
     // Hash password
+    console.log("🔒 Hashing password...")
     const hashedPassword = await bcrypt.hash(password, 12)
 
-    // Create user without role initially
-    const user = new User({
+    // Create user data WITHOUT role field (let it be undefined)
+    const userData = {
       username: username.trim(),
       email: email.trim().toLowerCase(),
       password: hashedPassword,
       bloodGroup,
-      role: null, // User will select role after signup
-    })
+      // Explicitly NOT setting role - it will be undefined
+    }
 
-    await user.save()
+    console.log("💾 Creating user in database...")
+    const user = new User(userData)
+
+    // Save user
+    const savedUser = await user.save()
+    console.log("✅ User created successfully:", savedUser._id)
 
     // Generate JWT token
-    const token = jwt.sign({ userId: user._id, username: user.username, role: user.role }, JWT_SECRET, {
-      expiresIn: "24h",
-    })
+    const token = jwt.sign(
+      {
+        userId: savedUser._id,
+        username: savedUser.username,
+        role: savedUser.role || null,
+      },
+      JWT_SECRET,
+      { expiresIn: "24h" },
+    )
 
+    const responseUser = {
+      id: savedUser._id,
+      username: savedUser.username,
+      email: savedUser.email,
+      role: savedUser.role || null,
+      bloodGroup: savedUser.bloodGroup,
+      isAvailable: savedUser.isAvailable,
+      matchStatus: savedUser.matchStatus,
+      isDonor: savedUser.isDonor,
+      isRequester: savedUser.isRequester,
+    }
+
+    console.log("🎉 Signup successful, sending response")
     res.status(201).json({
       token,
-      user: {
-        id: user._id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        bloodGroup: user.bloodGroup,
-        isAvailable: user.isAvailable,
-        matchStatus: user.matchStatus,
-        isDonor: user.isDonor,
-        isRequester: user.isRequester,
-      },
+      user: responseUser,
     })
   } catch (error) {
-    console.error("Signup error:", error)
+    console.error("💥 Signup error:", error)
+
     if (error.code === 11000) {
-      return res.status(400).json({ message: "Username or email already exists" })
+      // Duplicate key error
+      const field = Object.keys(error.keyPattern)[0]
+      const message = `${field.charAt(0).toUpperCase() + field.slice(1)} already exists`
+      return res.status(400).json({ message })
     }
-    res.status(500).json({ message: "Server error during signup" })
+
+    if (error.name === "ValidationError") {
+      const messages = Object.values(error.errors).map((err) => err.message)
+      console.log("❌ Validation error details:", messages)
+      return res.status(400).json({ message: messages.join(", ") })
+    }
+
+    res.status(500).json({ message: "Server error during signup. Please try again." })
   }
 })
 
 app.post("/api/auth/login", checkDBConnection, async (req, res) => {
   try {
     const { username, password } = req.body
+
+    console.log("🔑 Login attempt for:", username)
 
     if (!username || !password) {
       return res.status(400).json({ message: "Username and password are required" })
@@ -302,14 +386,18 @@ app.post("/api/auth/login", checkDBConnection, async (req, res) => {
     // Find user
     const user = await User.findOne({ username: username.trim() })
     if (!user) {
+      console.log("❌ Login failed: User not found")
       return res.status(400).json({ message: "Invalid username or password" })
     }
 
     // Check password
     const isMatch = await bcrypt.compare(password, user.password)
     if (!isMatch) {
+      console.log("❌ Login failed: Invalid password")
       return res.status(400).json({ message: "Invalid username or password" })
     }
+
+    console.log("✅ Login successful for:", username)
 
     // Generate JWT token
     const token = jwt.sign({ userId: user._id, username: user.username, role: user.role }, JWT_SECRET, {
@@ -322,7 +410,7 @@ app.post("/api/auth/login", checkDBConnection, async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        role: user.role,
+        role: user.role || null,
         bloodGroup: user.bloodGroup,
         isAvailable: user.isAvailable,
         matchStatus: user.matchStatus,
@@ -347,7 +435,7 @@ app.get("/api/auth/profile", authenticateToken, checkDBConnection, async (req, r
       id: user._id,
       username: user.username,
       email: user.email,
-      role: user.role,
+      role: user.role || null,
       bloodGroup: user.bloodGroup,
       isAvailable: user.isAvailable,
       matchStatus: user.matchStatus,
@@ -364,6 +452,8 @@ app.get("/api/auth/profile", authenticateToken, checkDBConnection, async (req, r
 app.put("/api/auth/update-role", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     const { role, bloodGroup } = req.body
+
+    console.log("🔄 Updating role for user:", req.user.userId, "to:", role)
 
     if (!role || !["donor", "requester"].includes(role)) {
       return res.status(400).json({ message: "Valid role (donor or requester) is required" })
@@ -388,6 +478,8 @@ app.put("/api/auth/update-role", authenticateToken, checkDBConnection, async (re
       return res.status(404).json({ message: "User not found" })
     }
 
+    console.log("✅ Role updated successfully for:", user.username)
+
     // Generate new token with updated role
     const token = jwt.sign({ userId: user._id, username: user.username, role: user.role }, JWT_SECRET, {
       expiresIn: "24h",
@@ -410,6 +502,28 @@ app.put("/api/auth/update-role", authenticateToken, checkDBConnection, async (re
   } catch (error) {
     console.error("Update role error:", error)
     res.status(500).json({ message: "Server error" })
+  }
+})
+
+// Test route to check database operations
+app.get("/api/test/db", checkDBConnection, async (req, res) => {
+  try {
+    const userCount = await User.countDocuments()
+    const requestCount = await Request.countDocuments()
+    const matchCount = await Match.countDocuments()
+
+    res.json({
+      message: "Database test successful",
+      collections: {
+        users: userCount,
+        requests: requestCount,
+        matches: matchCount,
+      },
+      timestamp: new Date().toISOString(),
+    })
+  } catch (error) {
+    console.error("Database test error:", error)
+    res.status(500).json({ message: "Database test failed", error: error.message })
   }
 })
 
@@ -675,7 +789,7 @@ app.get("/api/health", (req, res) => {
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack)
+  console.error("💥 Unhandled error:", err.stack)
   res.status(500).json({ message: "Something went wrong!" })
 })
 
@@ -690,6 +804,7 @@ app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`)
   console.log(`🔍 Health check: http://localhost:${PORT}/api/health`)
   console.log(`🌐 API Base URL: http://localhost:${PORT}/api`)
+  console.log(`🧪 Database test: http://localhost:${PORT}/api/test/db`)
   console.log(`📊 MongoDB Status: ${mongoose.connection.readyState === 1 ? "✅ Connected" : "❌ Disconnected"}`)
 })
 
