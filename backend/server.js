@@ -1,0 +1,566 @@
+const express = require("express")
+const mongoose = require("mongoose")
+const cors = require("cors")
+const bcrypt = require("bcryptjs")
+const jwt = require("jsonwebtoken")
+require("dotenv").config()
+
+const app = express()
+
+// Middleware
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL || "http://localhost:3000",
+    credentials: true,
+  }),
+)
+app.use(express.json({ limit: "10mb" }))
+app.use(express.urlencoded({ extended: true, limit: "10mb" }))
+
+// MongoDB connection with better error handling
+const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/blooddonation", {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    })
+    console.log(`MongoDB Connected: ${conn.connection.host}`)
+  } catch (error) {
+    console.error("MongoDB connection error:", error)
+    process.exit(1)
+  }
+}
+
+connectDB()
+
+// User Schema
+const userSchema = new mongoose.Schema({
+  username: { type: String, required: true, unique: true, trim: true },
+  email: { type: String, required: true, unique: true, trim: true, lowercase: true },
+  password: { type: String, required: true, minlength: 6 },
+  role: { type: String, enum: ["donor", "requester", "admin"], required: true },
+  bloodGroup: { type: String, required: true, enum: ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"] },
+  isAvailable: { type: Boolean, default: true },
+  matchStatus: { type: String, default: "Available" },
+  createdAt: { type: Date, default: Date.now },
+})
+
+// Blood Request Schema
+const requestSchema = new mongoose.Schema({
+  requester: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  requesterName: { type: String, required: true },
+  bloodGroup: { type: String, required: true, enum: ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"] },
+  urgency: { type: String, enum: ["low", "medium", "high", "critical"], required: true },
+  description: { type: String, trim: true },
+  status: { type: String, default: "Pending", enum: ["Pending", "Matched", "Completed", "Cancelled"] },
+  createdAt: { type: Date, default: Date.now },
+})
+
+// Match Schema
+const matchSchema = new mongoose.Schema({
+  donor: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  requester: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  request: { type: mongoose.Schema.Types.ObjectId, ref: "Request", required: true },
+  donorName: { type: String, required: true },
+  requesterName: { type: String, required: true },
+  bloodGroup: { type: String, required: true },
+  status: { type: String, default: "Pending", enum: ["Pending", "Accepted", "Rejected", "Completed"] },
+  createdAt: { type: Date, default: Date.now },
+})
+
+// History Schema
+const historySchema = new mongoose.Schema({
+  donor: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  requester: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  donorName: { type: String, required: true },
+  requesterName: { type: String, required: true },
+  bloodGroup: { type: String, required: true },
+  status: { type: String, required: true },
+  date: { type: Date, default: Date.now },
+})
+
+const User = mongoose.model("User", userSchema)
+const Request = mongoose.model("Request", requestSchema)
+const Match = mongoose.model("Match", matchSchema)
+const History = mongoose.model("History", historySchema)
+
+// JWT Secret
+const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-this"
+
+// Middleware to verify JWT token
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers["authorization"]
+  const token = authHeader && authHeader.split(" ")[1]
+
+  if (!token) {
+    return res.status(401).json({ message: "Access token required" })
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ message: "Invalid token" })
+    }
+    req.user = user
+    next()
+  })
+}
+
+// Blood compatibility logic
+const getCompatibleBloodGroups = (requestedBloodGroup) => {
+  const compatibility = {
+    "A+": ["A+", "A-", "O+", "O-"],
+    "A-": ["A-", "O-"],
+    "B+": ["B+", "B-", "O+", "O-"],
+    "B-": ["B-", "O-"],
+    "AB+": ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"],
+    "AB-": ["A-", "B-", "AB-", "O-"],
+    "O+": ["O+", "O-"],
+    "O-": ["O-"],
+  }
+  return compatibility[requestedBloodGroup] || []
+}
+
+// Create default admin user
+const createDefaultAdmin = async () => {
+  try {
+    const adminExists = await User.findOne({ username: "admin" })
+    if (!adminExists) {
+      const hashedPassword = await bcrypt.hash("admin123", 12)
+      const admin = new User({
+        username: "admin",
+        email: "admin@blooddonation.com",
+        password: hashedPassword,
+        role: "admin",
+        bloodGroup: "O+",
+      })
+      await admin.save()
+      console.log("Default admin user created - Username: admin, Password: admin123")
+    }
+  } catch (error) {
+    console.error("Error creating default admin:", error)
+  }
+}
+
+// Initialize default admin after DB connection
+mongoose.connection.once("open", () => {
+  createDefaultAdmin()
+})
+
+// Validation middleware
+const validateSignup = (req, res, next) => {
+  const { username, email, password, role, bloodGroup } = req.body
+
+  if (!username || !email || !password || !role || !bloodGroup) {
+    return res.status(400).json({ message: "All fields are required" })
+  }
+
+  if (password.length < 6) {
+    return res.status(400).json({ message: "Password must be at least 6 characters long" })
+  }
+
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ message: "Please enter a valid email address" })
+  }
+
+  if (!["donor", "requester"].includes(role)) {
+    return res.status(400).json({ message: "Invalid role" })
+  }
+
+  if (!["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].includes(bloodGroup)) {
+    return res.status(400).json({ message: "Invalid blood group" })
+  }
+
+  next()
+}
+
+// Auth Routes
+app.post("/api/auth/signup", validateSignup, async (req, res) => {
+  try {
+    const { username, email, password, role, bloodGroup } = req.body
+
+    // Check if user already exists
+    const existingUser = await User.findOne({
+      $or: [{ username: username.trim() }, { email: email.trim().toLowerCase() }],
+    })
+
+    if (existingUser) {
+      return res.status(400).json({
+        message: existingUser.username === username.trim() ? "Username already exists" : "Email already exists",
+      })
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 12)
+
+    // Create user
+    const user = new User({
+      username: username.trim(),
+      email: email.trim().toLowerCase(),
+      password: hashedPassword,
+      role,
+      bloodGroup,
+    })
+
+    await user.save()
+
+    // Generate JWT token
+    const token = jwt.sign({ userId: user._id, username: user.username, role: user.role }, JWT_SECRET, {
+      expiresIn: "24h",
+    })
+
+    res.status(201).json({
+      token,
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        bloodGroup: user.bloodGroup,
+        isAvailable: user.isAvailable,
+        matchStatus: user.matchStatus,
+      },
+    })
+  } catch (error) {
+    console.error("Signup error:", error)
+    if (error.code === 11000) {
+      return res.status(400).json({ message: "Username or email already exists" })
+    }
+    res.status(500).json({ message: "Server error during signup" })
+  }
+})
+
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { username, password } = req.body
+
+    if (!username || !password) {
+      return res.status(400).json({ message: "Username and password are required" })
+    }
+
+    // Find user
+    const user = await User.findOne({ username: username.trim() })
+    if (!user) {
+      return res.status(400).json({ message: "Invalid credentials" })
+    }
+
+    // Check password
+    const isMatch = await bcrypt.compare(password, user.password)
+    if (!isMatch) {
+      return res.status(400).json({ message: "Invalid credentials" })
+    }
+
+    // Generate JWT token
+    const token = jwt.sign({ userId: user._id, username: user.username, role: user.role }, JWT_SECRET, {
+      expiresIn: "24h",
+    })
+
+    res.json({
+      token,
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        bloodGroup: user.bloodGroup,
+        isAvailable: user.isAvailable,
+        matchStatus: user.matchStatus,
+      },
+    })
+  } catch (error) {
+    console.error("Login error:", error)
+    res.status(500).json({ message: "Server error during login" })
+  }
+})
+
+app.get("/api/auth/profile", authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId).select("-password")
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    res.json({
+      id: user._id,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+      bloodGroup: user.bloodGroup,
+      isAvailable: user.isAvailable,
+      matchStatus: user.matchStatus,
+    })
+  } catch (error) {
+    console.error("Profile error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+// Donor Routes
+app.put("/api/donor/availability", authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== "donor") {
+      return res.status(403).json({ message: "Only donors can update availability" })
+    }
+
+    const { isAvailable } = req.body
+
+    if (typeof isAvailable !== "boolean") {
+      return res.status(400).json({ message: "isAvailable must be a boolean" })
+    }
+
+    await User.findByIdAndUpdate(req.user.userId, { isAvailable })
+
+    res.json({ message: "Availability updated successfully" })
+  } catch (error) {
+    console.error("Update availability error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+app.get("/api/donor/history", authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== "donor") {
+      return res.status(403).json({ message: "Only donors can view donation history" })
+    }
+
+    const history = await History.find({ donor: req.user.userId }).sort({ date: -1 })
+
+    res.json(history)
+  } catch (error) {
+    console.error("Get history error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+// Requester Routes
+app.post("/api/requester/request", authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== "requester") {
+      return res.status(403).json({ message: "Only requesters can create blood requests" })
+    }
+
+    const { bloodGroup, urgency, description } = req.body
+
+    if (!bloodGroup || !urgency) {
+      return res.status(400).json({ message: "Blood group and urgency are required" })
+    }
+
+    if (!["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].includes(bloodGroup)) {
+      return res.status(400).json({ message: "Invalid blood group" })
+    }
+
+    if (!["low", "medium", "high", "critical"].includes(urgency)) {
+      return res.status(400).json({ message: "Invalid urgency level" })
+    }
+
+    const user = await User.findById(req.user.userId)
+
+    const request = new Request({
+      requester: req.user.userId,
+      requesterName: user.username,
+      bloodGroup,
+      urgency,
+      description: description?.trim() || "",
+    })
+
+    await request.save()
+
+    res.status(201).json({ message: "Request created successfully" })
+  } catch (error) {
+    console.error("Create request error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+app.get("/api/requester/requests", authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== "requester") {
+      return res.status(403).json({ message: "Only requesters can view their requests" })
+    }
+
+    const requests = await Request.find({ requester: req.user.userId }).sort({ createdAt: -1 })
+
+    res.json(requests)
+  } catch (error) {
+    console.error("Get requests error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+// Admin Routes
+app.get("/api/admin/donors", authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Admin access required" })
+    }
+
+    const donors = await User.find({ role: "donor" }).select("-password").sort({ createdAt: -1 })
+    res.json(donors)
+  } catch (error) {
+    console.error("Get donors error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+app.get("/api/admin/requests", authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Admin access required" })
+    }
+
+    const requests = await Request.find().sort({ createdAt: -1 })
+    res.json(requests)
+  } catch (error) {
+    console.error("Get requests error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+app.get("/api/admin/matches", authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Admin access required" })
+    }
+
+    const matches = await Match.find().sort({ createdAt: -1 })
+    res.json(matches)
+  } catch (error) {
+    console.error("Get matches error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+app.post("/api/admin/create-matches", authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Admin access required" })
+    }
+
+    // Get all pending requests
+    const pendingRequests = await Request.find({ status: "Pending" })
+
+    let matchesCreated = 0
+
+    for (const request of pendingRequests) {
+      // Find compatible donors
+      const compatibleBloodGroups = getCompatibleBloodGroups(request.bloodGroup)
+
+      const availableDonors = await User.find({
+        role: "donor",
+        bloodGroup: { $in: compatibleBloodGroups },
+        isAvailable: true,
+        matchStatus: "Available",
+      })
+
+      // Create matches for available donors
+      for (const donor of availableDonors) {
+        // Check if match already exists
+        const existingMatch = await Match.findOne({
+          donor: donor._id,
+          request: request._id,
+        })
+
+        if (!existingMatch) {
+          const match = new Match({
+            donor: donor._id,
+            requester: request.requester,
+            request: request._id,
+            donorName: donor.username,
+            requesterName: request.requesterName,
+            bloodGroup: request.bloodGroup,
+          })
+
+          await match.save()
+          matchesCreated++
+        }
+      }
+    }
+
+    res.json({ message: `${matchesCreated} matches created successfully` })
+  } catch (error) {
+    console.error("Create matches error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+app.put("/api/admin/matches/:matchId/accept", authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ message: "Admin access required" })
+    }
+
+    const { matchId } = req.params
+
+    if (!mongoose.Types.ObjectId.isValid(matchId)) {
+      return res.status(400).json({ message: "Invalid match ID" })
+    }
+
+    // Update match status
+    const match = await Match.findByIdAndUpdate(matchId, { status: "Accepted" }, { new: true })
+
+    if (!match) {
+      return res.status(404).json({ message: "Match not found" })
+    }
+
+    // Update user statuses
+    await User.findByIdAndUpdate(match.donor, {
+      matchStatus: "Blood group matched",
+    })
+
+    await User.findByIdAndUpdate(match.requester, {
+      matchStatus: "Blood group matched",
+    })
+
+    // Update request status
+    await Request.findByIdAndUpdate(match.request, {
+      status: "Matched",
+    })
+
+    // Create history record
+    const history = new History({
+      donor: match.donor,
+      requester: match.requester,
+      donorName: match.donorName,
+      requesterName: match.requesterName,
+      bloodGroup: match.bloodGroup,
+      status: "Matched",
+    })
+
+    await history.save()
+
+    res.json({ message: "Match accepted successfully" })
+  } catch (error) {
+    console.error("Accept match error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+// Health check endpoint
+app.get("/api/health", (req, res) => {
+  res.json({
+    status: "OK",
+    message: "Blood Donation API is running",
+    timestamp: new Date().toISOString(),
+    mongodb: mongoose.connection.readyState === 1 ? "Connected" : "Disconnected",
+  })
+})
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack)
+  res.status(500).json({ message: "Something went wrong!" })
+})
+
+// 404 handler
+app.use("*", (req, res) => {
+  res.status(404).json({ message: "Route not found" })
+})
+
+const PORT = process.env.PORT || 5000
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`)
+  console.log(`Health check: http://localhost:${PORT}/api/health`)
+})
+
+module.exports = app
