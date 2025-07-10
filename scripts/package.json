@@ -1,16 +1,14 @@
 {
-  "name": "database-scripts",
+  "name": "blood-donation-scripts",
   "version": "1.0.0",
-  "description": "Database management scripts",
-  "main": "reset-database.js",
+  "description": "Database seeding and management scripts for Blood Donation Platform",
+  "main": "seed-docker-data.js",
   "scripts": {
-    "reset": "node reset-database.js",
-    "seed": "node seed-data.js",
-    "reset-and-seed": "node reset-database.js && node seed-data.js"
+    "seed": "node seed-docker-data.js",
+    "seed-dev": "MONGODB_URI=mongodb://localhost:27017/blooddonation node seed-docker-data.js"
   },
   "dependencies": {
     "mongoose": "^7.5.0",
-    "dotenv": "^16.3.1",
     "bcryptjs": "^2.4.3"
   }
 }

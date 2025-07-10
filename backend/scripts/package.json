@@ -1,0 +1,13 @@
+{
+  "name": "blood-donation-scripts",
+  "version": "1.0.0",
+  "description": "Database seeding scripts for Blood Donation Platform",
+  "main": "seed-docker-data.js",
+  "scripts": {
+    "seed": "node seed-docker-data.js"
+  },
+  "dependencies": {
+    "mongoose": "^7.5.0",
+    "bcryptjs": "^2.4.3"
+  }
+}
