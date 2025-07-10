@@ -55,7 +55,7 @@ const connectDB = async () => {
 // Connect to MongoDB
 connectDB()
 
-// User Schema - COMPLETELY FIXED to handle null roles properly
+// User Schema
 const userSchema = new mongoose.Schema({
   username: {
     type: String,
@@ -81,11 +81,10 @@ const userSchema = new mongoose.Schema({
       values: ["donor", "requester", "admin"],
       message: "{VALUE} is not a valid role",
     },
-    default: undefined, // Use undefined instead of null
+    default: undefined,
     required: false,
     validate: {
       validator: (v) => {
-        // Allow undefined, null, or valid enum values
         return v === undefined || v === null || ["donor", "requester", "admin"].includes(v)
       },
       message: "Role must be donor, requester, admin, or empty",
@@ -135,10 +134,12 @@ const requestSchema = new mongoose.Schema({
   urgency: { type: String, enum: ["low", "medium", "high", "critical"], required: true },
   description: { type: String, trim: true },
   status: { type: String, default: "Pending", enum: ["Pending", "Matched", "Completed", "Cancelled"] },
+  matchedWith: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, // Track which donor matched
+  matchedAt: { type: Date }, // When the match was confirmed
   createdAt: { type: Date, default: Date.now },
 })
 
-// Match Schema - Enhanced with contact information
+// Enhanced Match Schema for Peer-to-Peer System
 const matchSchema = new mongoose.Schema({
   donor: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   requester: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
@@ -146,8 +147,33 @@ const matchSchema = new mongoose.Schema({
   donorName: { type: String, required: true },
   requesterName: { type: String, required: true },
   bloodGroup: { type: String, required: true },
-  status: { type: String, default: "Pending", enum: ["Pending", "Accepted", "Rejected", "Completed", "Cancelled"] },
-  // Contact information shared after match acceptance
+
+  // Enhanced status tracking
+  status: {
+    type: String,
+    default: "pending",
+    enum: [
+      "pending",
+      "donor_accepted",
+      "requester_accepted",
+      "both_accepted",
+      "donor_rejected",
+      "requester_rejected",
+      "expired",
+    ],
+  },
+
+  // Individual responses
+  donorResponse: { type: String, default: "pending", enum: ["pending", "accepted", "rejected"] },
+  requesterResponse: { type: String, default: "pending", enum: ["pending", "accepted", "rejected"] },
+
+  // Timing
+  expiresAt: { type: Date, required: true },
+  createdAt: { type: Date, default: Date.now },
+  donorRespondedAt: { type: Date },
+  requesterRespondedAt: { type: Date },
+
+  // Contact information (only populated when both accept)
   donorInfo: {
     email: String,
     phone: String,
@@ -160,17 +186,17 @@ const matchSchema = new mongoose.Schema({
     urgency: String,
     description: String,
   },
-  createdAt: { type: Date, default: Date.now },
 })
 
 // Notification Schema
 const notificationSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-  type: { type: String, required: true }, // 'match_found', 'request_cancelled', 'donor_unavailable'
+  type: { type: String, required: true }, // 'match_request', 'match_accepted', 'match_rejected', 'reminder'
   title: { type: String, required: true },
   message: { type: String, required: true },
-  data: { type: mongoose.Schema.Types.Mixed }, // Additional data like contact info
+  data: { type: mongoose.Schema.Types.Mixed }, // Additional data like match info
   read: { type: Boolean, default: false },
+  matchId: { type: mongoose.Schema.Types.ObjectId, ref: "Match" }, // Reference to match
   createdAt: { type: Date, default: Date.now },
 })
 
@@ -224,7 +250,7 @@ const authenticateToken = (req, res, next) => {
 }
 
 // Helper function to create notifications
-const createNotification = async (userId, type, title, message, data = {}) => {
+const createNotification = async (userId, type, title, message, data = {}, matchId = null) => {
   try {
     const notification = new Notification({
       userId,
@@ -232,6 +258,7 @@ const createNotification = async (userId, type, title, message, data = {}) => {
       title,
       message,
       data,
+      matchId,
     })
     await notification.save()
     console.log(`📢 Notification created for user ${userId}: ${title}`)
@@ -254,6 +281,402 @@ const getCompatibleBloodGroups = (requestedBloodGroup) => {
   }
   return compatibility[requestedBloodGroup] || []
 }
+
+// AUTOMATIC MATCH DETECTION SYSTEM
+const findAndCreateMatches = async (requestId = null, donorId = null) => {
+  try {
+    console.log("🔍 Finding automatic matches...")
+
+    let requests = []
+    let donors = []
+
+    if (requestId) {
+      // New request created - find compatible donors
+      const request = await Request.findById(requestId).populate("requester")
+      if (request && request.status === "Pending") {
+        requests = [request]
+        const compatibleBloodGroups = getCompatibleBloodGroups(request.bloodGroup)
+        donors = await User.find({
+          role: "donor",
+          bloodGroup: { $in: compatibleBloodGroups },
+          isAvailable: true,
+          matchStatus: "Available",
+        })
+      }
+    } else if (donorId) {
+      // Donor became available - find compatible requests
+      const donor = await User.findById(donorId)
+      if (donor && donor.isAvailable && donor.matchStatus === "Available") {
+        donors = [donor]
+        requests = await Request.find({
+          status: "Pending",
+          bloodGroup: { $in: getCompatibleBloodGroups(donor.bloodGroup) },
+        }).populate("requester")
+      }
+    } else {
+      // General match finding
+      requests = await Request.find({ status: "Pending" }).populate("requester")
+      donors = await User.find({
+        role: "donor",
+        isAvailable: true,
+        matchStatus: "Available",
+      })
+    }
+
+    let matchesCreated = 0
+
+    for (const request of requests) {
+      const compatibleBloodGroups = getCompatibleBloodGroups(request.bloodGroup)
+      const compatibleDonors = donors.filter((donor) => compatibleBloodGroups.includes(donor.bloodGroup))
+
+      for (const donor of compatibleDonors) {
+        // Check if match already exists
+        const existingMatch = await Match.findOne({
+          donor: donor._id,
+          request: request._id,
+          status: { $in: ["pending", "donor_accepted", "requester_accepted", "both_accepted"] },
+        })
+
+        if (!existingMatch) {
+          // Create new match with 12-hour expiry
+          const expiresAt = new Date(Date.now() + 12 * 60 * 60 * 1000) // 12 hours from now
+
+          const match = new Match({
+            donor: donor._id,
+            requester: request.requester._id,
+            request: request._id,
+            donorName: donor.username,
+            requesterName: request.requesterName,
+            bloodGroup: request.bloodGroup,
+            expiresAt: expiresAt,
+          })
+
+          await match.save()
+          matchesCreated++
+
+          // Send notifications to both parties
+          await createNotification(
+            donor._id,
+            "match_request",
+            "New Blood Donation Request",
+            `${request.requesterName} needs ${request.bloodGroup} blood (${request.urgency} urgency). Would you like to help?`,
+            {
+              matchId: match._id,
+              requesterName: request.requesterName,
+              bloodGroup: request.bloodGroup,
+              urgency: request.urgency,
+              description: request.description,
+              expiresAt: expiresAt,
+            },
+            match._id,
+          )
+
+          await createNotification(
+            request.requester._id,
+            "match_request",
+            "Potential Donor Found",
+            `${donor.username} (${donor.bloodGroup}) might be able to help with your blood request. Waiting for their response.`,
+            {
+              matchId: match._id,
+              donorName: donor.username,
+              donorBloodGroup: donor.bloodGroup,
+              expiresAt: expiresAt,
+            },
+            match._id,
+          )
+
+          console.log(`✅ Created match: ${donor.username} ↔ ${request.requesterName}`)
+        }
+      }
+    }
+
+    console.log(`🎉 Created ${matchesCreated} new matches`)
+    return matchesCreated
+  } catch (error) {
+    console.error("Error in automatic match detection:", error)
+    return 0
+  }
+}
+
+// ENHANCED MATCH RESPONSE SYSTEM
+const processMatchResponse = async (matchId, userId, response) => {
+  try {
+    const match = await Match.findById(matchId)
+      .populate("donor", "username email phone location bloodGroup")
+      .populate("requester", "username email phone location")
+      .populate("request", "urgency description")
+
+    if (!match || match.status === "expired" || match.status === "both_accepted") {
+      return { success: false, message: "Match not found or already processed" }
+    }
+
+    // Check if match has expired
+    if (new Date() > match.expiresAt) {
+      await Match.findByIdAndUpdate(matchId, { status: "expired" })
+      return { success: false, message: "Match has expired" }
+    }
+
+    const isDonor = match.donor._id.toString() === userId
+    const isRequester = match.requester._id.toString() === userId
+
+    if (!isDonor && !isRequester) {
+      return { success: false, message: "Unauthorized to respond to this match" }
+    }
+
+    // Update the response
+    const updateData = {}
+    if (isDonor) {
+      updateData.donorResponse = response
+      updateData.donorRespondedAt = new Date()
+      if (response === "accepted") {
+        updateData.status = match.requesterResponse === "accepted" ? "both_accepted" : "donor_accepted"
+      } else {
+        updateData.status = "donor_rejected"
+      }
+    } else {
+      updateData.requesterResponse = response
+      updateData.requesterRespondedAt = new Date()
+      if (response === "accepted") {
+        updateData.status = match.donorResponse === "accepted" ? "both_accepted" : "requester_accepted"
+      } else {
+        updateData.status = "requester_rejected"
+      }
+    }
+
+    const updatedMatch = await Match.findByIdAndUpdate(matchId, updateData, { new: true })
+
+    // If either party rejected, notify the other party
+    if (response === "rejected") {
+      const otherUserId = isDonor ? match.requester._id : match.donor._id
+      const otherUserName = isDonor ? match.requesterName : match.donorName
+      const currentUserName = isDonor ? match.donorName : match.requesterName
+
+      await createNotification(
+        otherUserId,
+        "match_rejected",
+        "Match Request Declined",
+        `${currentUserName} has declined the blood donation match.`,
+        { matchId: match._id },
+        match._id,
+      )
+    }
+
+    // If both accepted, exchange contact information and update statuses
+    if (updatedMatch.status === "both_accepted") {
+      // Update match with contact information
+      await Match.findByIdAndUpdate(matchId, {
+        donorInfo: {
+          email: match.donor.email,
+          phone: match.donor.phone || "Not provided",
+          location: match.donor.location || "Not provided",
+        },
+        requesterInfo: {
+          email: match.requester.email,
+          phone: match.requester.phone || "Not provided",
+          location: match.requester.location || "Not provided",
+          urgency: match.request.urgency,
+          description: match.request.description || "No additional details",
+        },
+      })
+
+      // Update user statuses - Remove from available lists
+      await User.findByIdAndUpdate(match.donor._id, {
+        isAvailable: false,
+        matchStatus: "Matched",
+      })
+
+      await User.findByIdAndUpdate(match.requester._id, {
+        matchStatus: "Matched",
+      })
+
+      // 🔥 ENHANCED: Update request status and track the match
+      await Request.findByIdAndUpdate(match.request._id, {
+        status: "Matched",
+        matchedWith: match.donor._id,
+        matchedAt: new Date(),
+      })
+
+      // 🔥 ENHANCED: Cancel all other pending matches for this request
+      const otherMatches = await Match.find({
+        request: match.request._id,
+        _id: { $ne: matchId },
+        status: { $in: ["pending", "donor_accepted", "requester_accepted"] },
+      }).populate("donor requester")
+
+      for (const otherMatch of otherMatches) {
+        await Match.findByIdAndUpdate(otherMatch._id, { status: "expired" })
+
+        // Notify other donors that the request is no longer available
+        await createNotification(
+          otherMatch.donor._id,
+          "request_fulfilled",
+          "Blood Request Fulfilled",
+          `The blood request from ${otherMatch.requesterName} has been fulfilled by another donor.`,
+          { matchId: otherMatch._id },
+          otherMatch._id,
+        )
+      }
+
+      // Send success notifications with contact information
+      await createNotification(
+        match.donor._id,
+        "match_accepted",
+        "Blood Match Confirmed! 🩸",
+        `Both you and ${match.requesterName} have accepted the match. Contact details have been shared.`,
+        {
+          matchId: match._id,
+          requesterInfo: {
+            email: match.requester.email,
+            phone: match.requester.phone || "Not provided",
+            location: match.requester.location || "Not provided",
+            urgency: match.request.urgency,
+            description: match.request.description || "No additional details",
+          },
+          bloodGroup: match.bloodGroup,
+        },
+        match._id,
+      )
+
+      await createNotification(
+        match.requester._id,
+        "match_accepted",
+        "Donor Found! 🎉",
+        `Both you and ${match.donorName} have accepted the match. Contact details have been shared. Your request has been fulfilled!`,
+        {
+          matchId: match._id,
+          donorInfo: {
+            email: match.donor.email,
+            phone: match.donor.phone || "Not provided",
+            location: match.donor.location || "Not provided",
+          },
+          bloodGroup: match.bloodGroup,
+        },
+        match._id,
+      )
+
+      // Create history record
+      const history = new History({
+        donor: match.donor._id,
+        requester: match.requester._id,
+        donorName: match.donorName,
+        requesterName: match.requesterName,
+        bloodGroup: match.bloodGroup,
+        status: "Matched",
+      })
+      await history.save()
+
+      console.log(`🎉 Successful match: ${match.donorName} ↔ ${match.requesterName}`)
+      console.log(`📋 Request ${match.request._id} marked as Matched and removed from active lists`)
+    }
+
+    return { success: true, message: "Response recorded successfully", match: updatedMatch }
+  } catch (error) {
+    console.error("Error processing match response:", error)
+    return { success: false, message: "Server error" }
+  }
+}
+
+// BACKGROUND JOBS
+// Reminder notifications every 4 hours
+const sendReminderNotifications = async () => {
+  try {
+    const now = new Date()
+    const fourHoursAgo = new Date(now.getTime() - 4 * 60 * 60 * 1000)
+
+    const pendingMatches = await Match.find({
+      status: { $in: ["pending", "donor_accepted", "requester_accepted"] },
+      expiresAt: { $gt: now },
+      createdAt: { $lte: fourHoursAgo },
+    }).populate("donor requester request")
+
+    for (const match of pendingMatches) {
+      const timeRemaining = Math.ceil((match.expiresAt - now) / (1000 * 60 * 60)) // hours
+
+      if (match.donorResponse === "pending") {
+        await createNotification(
+          match.donor._id,
+          "reminder",
+          "Reminder: Blood Donation Request",
+          `${match.requesterName} is still waiting for your response. ${timeRemaining} hours remaining.`,
+          {
+            matchId: match._id,
+            timeRemaining: timeRemaining,
+            requesterName: match.requesterName,
+            bloodGroup: match.bloodGroup,
+            urgency: match.request.urgency,
+          },
+          match._id,
+        )
+      }
+
+      if (match.requesterResponse === "pending") {
+        await createNotification(
+          match.requester._id,
+          "reminder",
+          "Reminder: Donor Response Pending",
+          `${match.donorName} is considering your blood request. ${timeRemaining} hours remaining.`,
+          {
+            matchId: match._id,
+            timeRemaining: timeRemaining,
+            donorName: match.donorName,
+          },
+          match._id,
+        )
+      }
+    }
+
+    console.log(`📢 Sent reminder notifications for ${pendingMatches.length} matches`)
+  } catch (error) {
+    console.error("Error sending reminder notifications:", error)
+  }
+}
+
+// Expire old matches
+const expireOldMatches = async () => {
+  try {
+    const now = new Date()
+    const expiredMatches = await Match.find({
+      status: { $in: ["pending", "donor_accepted", "requester_accepted"] },
+      expiresAt: { $lte: now },
+    })
+
+    for (const match of expiredMatches) {
+      await Match.findByIdAndUpdate(match._id, { status: "expired" })
+
+      // Notify both parties about expiration
+      await createNotification(
+        match.donor,
+        "match_expired",
+        "Match Request Expired",
+        `The match request with ${match.requesterName} has expired.`,
+        { matchId: match._id },
+        match._id,
+      )
+
+      await createNotification(
+        match.requester,
+        "match_expired",
+        "Match Request Expired",
+        `The match request with ${match.donorName} has expired.`,
+        { matchId: match._id },
+        match._id,
+      )
+    }
+
+    console.log(`⏰ Expired ${expiredMatches.length} old matches`)
+  } catch (error) {
+    console.error("Error expiring old matches:", error)
+  }
+}
+
+// Run background jobs every 4 hours
+setInterval(
+  () => {
+    sendReminderNotifications()
+    expireOldMatches()
+  },
+  4 * 60 * 60 * 1000,
+) // 4 hours
 
 // Create default admin user
 const createDefaultAdmin = async () => {
@@ -466,7 +889,6 @@ app.post("/api/auth/login", checkDBConnection, async (req, res) => {
         isAvailable: user.isAvailable,
         matchStatus: user.matchStatus,
         isDonor: user.isDonor,
-        isDonor: user.isDonor,
         isRequester: user.isRequester,
       },
     })
@@ -600,31 +1022,10 @@ app.put("/api/donor/availability", authenticateToken, checkDBConnection, async (
 
     await User.findByIdAndUpdate(req.user.userId, updateData)
 
-    // If donor becomes unavailable, cancel any pending matches
-    if (!isAvailable) {
-      console.log("🚫 Donor became unavailable, cancelling pending matches...")
-
-      const pendingMatches = await Match.find({
-        donor: req.user.userId,
-        status: "Pending",
-      }).populate("requester")
-
-      for (const match of pendingMatches) {
-        // Cancel the match
-        await Match.findByIdAndUpdate(match._id, { status: "Cancelled" })
-
-        // Notify the requester
-        await createNotification(
-          match.requester._id,
-          "donor_unavailable",
-          "Donor Unavailable",
-          `The donor ${match.donorName} is no longer available for your ${match.bloodGroup} blood request.`,
-          { matchId: match._id, donorName: match.donorName },
-        )
-      }
-    } else {
-      // When donor becomes available again, they can receive new matches
-      console.log("✅ Donor became available again, ready for new matches")
+    // If donor becomes available, trigger automatic match detection
+    if (isAvailable) {
+      console.log("✅ Donor became available, triggering match detection...")
+      await findAndCreateMatches(null, req.user.userId)
     }
 
     res.json({
@@ -701,11 +1102,15 @@ app.post("/api/requester/request", authenticateToken, checkDBConnection, async (
       description: description?.trim() || "",
     })
 
-    await request.save()
+    const savedRequest = await request.save()
+
+    // Trigger automatic match detection for this new request
+    console.log("🩸 New request created, triggering match detection...")
+    await findAndCreateMatches(savedRequest._id)
 
     res.status(201).json({
-      message: "Request created successfully",
-      requestId: request._id,
+      message: "Request created successfully. Looking for compatible donors...",
+      requestId: savedRequest._id,
     })
   } catch (error) {
     console.error("Create request error:", error)
@@ -713,13 +1118,18 @@ app.post("/api/requester/request", authenticateToken, checkDBConnection, async (
   }
 })
 
+// 🔥 ENHANCED: Get requester requests - only show Pending and Cancelled, hide Matched
 app.get("/api/requester/requests", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "requester") {
       return res.status(403).json({ message: "Only requesters can view their requests" })
     }
 
-    const requests = await Request.find({ requester: req.user.userId }).sort({ createdAt: -1 })
+    // Only show Pending and Cancelled requests (hide Matched ones from active list)
+    const requests = await Request.find({
+      requester: req.user.userId,
+      status: { $in: ["Pending", "Cancelled"] },
+    }).sort({ createdAt: -1 })
 
     res.json(requests)
   } catch (error) {
@@ -728,7 +1138,29 @@ app.get("/api/requester/requests", authenticateToken, checkDBConnection, async (
   }
 })
 
-// NEW: Cancel blood request
+// 🔥 NEW: Get requester's matched requests (for records/history)
+app.get("/api/requester/matched-requests", authenticateToken, checkDBConnection, async (req, res) => {
+  try {
+    if (req.user.role !== "requester") {
+      return res.status(403).json({ message: "Only requesters can view their matched requests" })
+    }
+
+    // Get matched requests with donor information
+    const matchedRequests = await Request.find({
+      requester: req.user.userId,
+      status: "Matched",
+    })
+      .populate("matchedWith", "username email bloodGroup")
+      .sort({ matchedAt: -1 })
+
+    res.json(matchedRequests)
+  } catch (error) {
+    console.error("Get matched requests error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+// 🔥 ENHANCED: Cancel blood request - only allow for Pending requests
 app.put("/api/requester/requests/:requestId/cancel", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "requester") {
@@ -755,34 +1187,34 @@ app.put("/api/requester/requests/:requestId/cancel", authenticateToken, checkDBC
       return res.status(400).json({ message: "Request is already cancelled" })
     }
 
+    // 🔥 ENHANCED: Don't allow cancelling matched requests
+    if (request.status === "Matched") {
+      return res.status(400).json({
+        message: "Cannot cancel a matched request. Contact the donor directly if needed.",
+      })
+    }
+
     // Update request status
     await Request.findByIdAndUpdate(requestId, { status: "Cancelled" })
 
     // Find and cancel any pending matches for this request
     const pendingMatches = await Match.find({
       request: requestId,
-      status: { $in: ["Pending", "Accepted"] },
+      status: { $in: ["pending", "donor_accepted", "requester_accepted"] },
     }).populate("donor")
 
     for (const match of pendingMatches) {
       // Cancel the match
-      await Match.findByIdAndUpdate(match._id, { status: "Cancelled" })
-
-      // Reset donor availability if they were matched
-      if (match.status === "Accepted") {
-        await User.findByIdAndUpdate(match.donor._id, {
-          isAvailable: true,
-          matchStatus: "Available",
-        })
-      }
+      await Match.findByIdAndUpdate(match._id, { status: "requester_rejected" })
 
       // Notify the donor
       await createNotification(
         match.donor._id,
         "request_cancelled",
         "Blood Request Cancelled",
-        `The requester ${match.requesterName} has cancelled their ${match.bloodGroup} blood request.`,
+        `${match.requesterName} has cancelled their ${match.bloodGroup} blood request.`,
         { matchId: match._id, requesterName: match.requesterName },
+        match._id,
       )
     }
 
@@ -809,50 +1241,88 @@ app.get("/api/requester/notifications", authenticateToken, checkDBConnection, as
   }
 })
 
-// Allow requesters to create new requests even after being matched
-app.post("/api/requester/new-request", authenticateToken, checkDBConnection, async (req, res) => {
+// NEW PEER-TO-PEER MATCH ROUTES
+
+// Get pending match requests for user
+app.get("/api/matches/pending", authenticateToken, checkDBConnection, async (req, res) => {
   try {
-    if (req.user.role !== "requester") {
-      return res.status(403).json({ message: "Only requesters can create blood requests" })
+    const userId = req.user.userId
+    const userRole = req.user.role
+
+    let matches = []
+
+    if (userRole === "donor") {
+      matches = await Match.find({
+        donor: userId,
+        status: { $in: ["pending", "requester_accepted"] },
+        expiresAt: { $gt: new Date() },
+      })
+        .populate("requester", "username email")
+        .populate("request", "urgency description")
+        .sort({ createdAt: -1 })
+    } else if (userRole === "requester") {
+      matches = await Match.find({
+        requester: userId,
+        status: { $in: ["pending", "donor_accepted"] },
+        expiresAt: { $gt: new Date() },
+      })
+        .populate("donor", "username email bloodGroup")
+        .sort({ createdAt: -1 })
     }
 
-    const { bloodGroup, urgency, description } = req.body
-
-    if (!bloodGroup || !urgency) {
-      return res.status(400).json({ message: "Blood group and urgency are required" })
-    }
-
-    if (!["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].includes(bloodGroup)) {
-      return res.status(400).json({ message: "Invalid blood group" })
-    }
-
-    if (!["low", "medium", "high", "critical"].includes(urgency)) {
-      return res.status(400).json({ message: "Invalid urgency level" })
-    }
-
-    const user = await User.findById(req.user.userId)
-
-    const request = new Request({
-      requester: req.user.userId,
-      requesterName: user.username,
-      bloodGroup,
-      urgency,
-      description: description?.trim() || "",
-    })
-
-    await request.save()
-
-    // Reset user match status when creating new request
-    await User.findByIdAndUpdate(req.user.userId, {
-      matchStatus: "Active",
-    })
-
-    res.status(201).json({
-      message: "New request created successfully. You can now receive new matches.",
-      requestId: request._id,
-    })
+    res.json(matches)
   } catch (error) {
-    console.error("Create new request error:", error)
+    console.error("Get pending matches error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+// Get active (successful) matches for user
+app.get("/api/matches/active", authenticateToken, checkDBConnection, async (req, res) => {
+  try {
+    const userId = req.user.userId
+    const userRole = req.user.role
+
+    const matches = await Match.find({
+      $or: [{ donor: userId }, { requester: userId }],
+      status: "both_accepted",
+    })
+      .populate("donor", "username email bloodGroup phone location")
+      .populate("requester", "username email phone location")
+      .populate("request", "urgency description")
+      .sort({ createdAt: -1 })
+
+    res.json(matches)
+  } catch (error) {
+    console.error("Get active matches error:", error)
+    res.status(500).json({ message: "Server error" })
+  }
+})
+
+// Respond to match request
+app.post("/api/matches/:matchId/respond", authenticateToken, checkDBConnection, async (req, res) => {
+  try {
+    const { matchId } = req.params
+    const { response } = req.body
+    const userId = req.user.userId
+
+    if (!["accepted", "rejected"].includes(response)) {
+      return res.status(400).json({ message: "Response must be 'accepted' or 'rejected'" })
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(matchId)) {
+      return res.status(400).json({ message: "Invalid match ID" })
+    }
+
+    const result = await processMatchResponse(matchId, userId, response)
+
+    if (result.success) {
+      res.json({ message: result.message, match: result.match })
+    } else {
+      res.status(400).json({ message: result.message })
+    }
+  } catch (error) {
+    console.error("Match response error:", error)
     res.status(500).json({ message: "Server error" })
   }
 })
@@ -864,11 +1334,9 @@ app.get("/api/admin/donors", authenticateToken, checkDBConnection, async (req, r
       return res.status(403).json({ message: "Admin access required" })
     }
 
-    // Only show donors who are available AND not currently matched
+    // Show all donors with their current status
     const donors = await User.find({
       role: "donor",
-      isAvailable: true,
-      matchStatus: "Available", // Exclude "Matched" status donors
     })
       .select("-password")
       .sort({ createdAt: -1 })
@@ -886,10 +1354,8 @@ app.get("/api/admin/requests", authenticateToken, checkDBConnection, async (req,
       return res.status(403).json({ message: "Admin access required" })
     }
 
-    // Only show pending requests (not matched, cancelled, or completed)
-    const requests = await Request.find({
-      status: "Pending", // Only pending requests, not matched ones
-    }).sort({ createdAt: -1 })
+    // Show all requests
+    const requests = await Request.find({}).sort({ createdAt: -1 })
 
     res.json(requests)
   } catch (error) {
@@ -898,16 +1364,18 @@ app.get("/api/admin/requests", authenticateToken, checkDBConnection, async (req,
   }
 })
 
+// Admin view of all matches
 app.get("/api/admin/matches", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
       return res.status(403).json({ message: "Admin access required" })
     }
 
-    // Only show pending matches (not accepted, rejected, or completed)
-    const matches = await Match.find({
-      status: "Pending", // Only show pending matches for admin action
-    }).sort({ createdAt: -1 })
+    const matches = await Match.find({})
+      .populate("donor", "username email bloodGroup")
+      .populate("requester", "username email")
+      .populate("request", "urgency description")
+      .sort({ createdAt: -1 })
 
     res.json(matches)
   } catch (error) {
@@ -916,163 +1384,48 @@ app.get("/api/admin/matches", authenticateToken, checkDBConnection, async (req, 
   }
 })
 
-app.post("/api/admin/create-matches", authenticateToken, checkDBConnection, async (req, res) => {
+// Admin statistics
+app.get("/api/admin/stats", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
       return res.status(403).json({ message: "Admin access required" })
     }
 
-    // Get all pending requests
-    const pendingRequests = await Request.find({ status: "Pending" })
-
-    let matchesCreated = 0
-
-    for (const request of pendingRequests) {
-      // Find compatible donors (only available ones)
-      const compatibleBloodGroups = getCompatibleBloodGroups(request.bloodGroup)
-
-      const availableDonors = await User.find({
-        role: "donor",
-        bloodGroup: { $in: compatibleBloodGroups },
-        isAvailable: true,
-        matchStatus: "Available",
-      })
-
-      // Create matches for available donors
-      for (const donor of availableDonors) {
-        // Check if match already exists
-        const existingMatch = await Match.findOne({
-          donor: donor._id,
-          request: request._id,
-        })
-
-        if (!existingMatch) {
-          const match = new Match({
-            donor: donor._id,
-            requester: request.requester,
-            request: request._id,
-            donorName: donor.username,
-            requesterName: request.requesterName,
-            bloodGroup: request.bloodGroup,
-          })
-
-          await match.save()
-          matchesCreated++
-        }
-      }
+    const stats = {
+      totalUsers: await User.countDocuments(),
+      totalDonors: await User.countDocuments({ role: "donor" }),
+      totalRequesters: await User.countDocuments({ role: "requester" }),
+      availableDonors: await User.countDocuments({ role: "donor", isAvailable: true, matchStatus: "Available" }),
+      totalRequests: await Request.countDocuments(),
+      pendingRequests: await Request.countDocuments({ status: "Pending" }),
+      matchedRequests: await Request.countDocuments({ status: "Matched" }),
+      totalMatches: await Match.countDocuments(),
+      pendingMatches: await Match.countDocuments({
+        status: { $in: ["pending", "donor_accepted", "requester_accepted"] },
+      }),
+      successfulMatches: await Match.countDocuments({ status: "both_accepted" }),
+      expiredMatches: await Match.countDocuments({ status: "expired" }),
+      rejectedMatches: await Match.countDocuments({ status: { $in: ["donor_rejected", "requester_rejected"] } }),
     }
 
-    res.json({ message: `${matchesCreated} matches created successfully` })
+    res.json(stats)
   } catch (error) {
-    console.error("Create matches error:", error)
+    console.error("Get stats error:", error)
     res.status(500).json({ message: "Server error" })
   }
 })
 
-// ENHANCED: Accept match with information exchange
-app.put("/api/admin/matches/:matchId/accept", authenticateToken, checkDBConnection, async (req, res) => {
+// Manual trigger for match detection (admin only)
+app.post("/api/admin/trigger-matches", authenticateToken, checkDBConnection, async (req, res) => {
   try {
     if (req.user.role !== "admin") {
       return res.status(403).json({ message: "Admin access required" })
     }
 
-    const { matchId } = req.params
-
-    if (!mongoose.Types.ObjectId.isValid(matchId)) {
-      return res.status(400).json({ message: "Invalid match ID" })
-    }
-
-    // Get match with populated user data
-    const match = await Match.findById(matchId)
-      .populate("donor", "username email phone location bloodGroup")
-      .populate("requester", "username email phone location")
-      .populate("request", "urgency description")
-
-    if (!match) {
-      return res.status(404).json({ message: "Match not found" })
-    }
-
-    // Update match status and add contact information
-    const updatedMatch = await Match.findByIdAndUpdate(
-      matchId,
-      {
-        status: "Accepted",
-        donorInfo: {
-          email: match.donor.email,
-          phone: match.donor.phone || "Not provided",
-          location: match.donor.location || "Not provided",
-        },
-        requesterInfo: {
-          email: match.requester.email,
-          phone: match.requester.phone || "Not provided",
-          location: match.requester.location || "Not provided",
-          urgency: match.request.urgency,
-          description: match.request.description || "No additional details",
-        },
-      },
-      { new: true },
-    )
-
-    // Update donor status to matched/unavailable
-    await User.findByIdAndUpdate(match.donor._id, {
-      isAvailable: false,
-      matchStatus: "Matched",
-    })
-
-    // Update requester status
-    await User.findByIdAndUpdate(match.requester._id, {
-      matchStatus: "Matched",
-    })
-
-    // Update request status
-    await Request.findByIdAndUpdate(match.request._id, {
-      status: "Matched",
-    })
-
-    // Create notifications with contact information for both parties
-    await createNotification(
-      match.donor._id,
-      "match_accepted",
-      "Blood Match Confirmed!",
-      `Your blood donation has been matched with ${match.requesterName}. Contact details have been shared.`,
-      {
-        matchId: match._id,
-        requesterInfo: updatedMatch.requesterInfo,
-        bloodGroup: match.bloodGroup,
-        urgency: match.request.urgency,
-      },
-    )
-
-    await createNotification(
-      match.requester._id,
-      "match_accepted",
-      "Donor Found!",
-      `A donor ${match.donorName} has been found for your ${match.bloodGroup} blood request. Contact details have been shared.`,
-      {
-        matchId: match._id,
-        donorInfo: updatedMatch.donorInfo,
-        bloodGroup: match.bloodGroup,
-      },
-    )
-
-    // Create history record
-    const history = new History({
-      donor: match.donor._id,
-      requester: match.requester._id,
-      donorName: match.donorName,
-      requesterName: match.requesterName,
-      bloodGroup: match.bloodGroup,
-      status: "Matched",
-    })
-
-    await history.save()
-
-    res.json({
-      message: "Match accepted successfully. Contact information has been shared with both parties.",
-      match: updatedMatch,
-    })
+    const matchesCreated = await findAndCreateMatches()
+    res.json({ message: `${matchesCreated} matches created successfully` })
   } catch (error) {
-    console.error("Accept match error:", error)
+    console.error("Trigger matches error:", error)
     res.status(500).json({ message: "Server error" })
   }
 })
