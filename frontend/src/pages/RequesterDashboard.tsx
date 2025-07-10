@@ -14,6 +14,21 @@ interface BloodRequest {
   createdAt: string
 }
 
+interface MatchedRequest {
+  _id: string
+  bloodGroup: string
+  urgency: string
+  description: string
+  status: string
+  createdAt: string
+  matchedAt: string
+  matchedWith: {
+    username: string
+    email: string
+    bloodGroup: string
+  }
+}
+
 interface Notification {
   _id: string
   type: string
@@ -24,10 +39,48 @@ interface Notification {
   createdAt: string
 }
 
+interface PendingMatch {
+  _id: string
+  donorName: string
+  bloodGroup: string
+  status: string
+  expiresAt: string
+  donor: {
+    username: string
+    email: string
+    bloodGroup: string
+  }
+  donorResponse: string
+  requesterResponse: string
+}
+
+interface ActiveMatch {
+  _id: string
+  donorName: string
+  requesterName: string
+  bloodGroup: string
+  status: string
+  donorInfo: {
+    email: string
+    phone: string
+    location: string
+  }
+  requesterInfo: {
+    email: string
+    phone: string
+    location: string
+    urgency: string
+    description: string
+  }
+}
+
 function RequesterDashboard() {
   const { user } = useAuth()
   const [requests, setRequests] = useState<BloodRequest[]>([])
+  const [matchedRequests, setMatchedRequests] = useState<MatchedRequest[]>([])
   const [notifications, setNotifications] = useState<Notification[]>([])
+  const [pendingMatches, setPendingMatches] = useState<PendingMatch[]>([])
+  const [activeMatches, setActiveMatches] = useState<ActiveMatch[]>([])
   const [showForm, setShowForm] = useState(false)
   const [formData, setFormData] = useState({
     bloodGroup: "A+",
@@ -35,6 +88,7 @@ function RequesterDashboard() {
     description: "",
   })
   const [loading, setLoading] = useState(false)
+  const [respondingTo, setRespondingTo] = useState<string | null>(null)
 
   const bloodGroups = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"]
   const urgencyLevels = ["low", "medium", "high", "critical"]
@@ -42,9 +96,21 @@ function RequesterDashboard() {
   const API_BASE_URL = process.env.REACT_APP_API_URL || "http://localhost:5000"
 
   useEffect(() => {
-    fetchRequests()
-    fetchNotifications()
+    fetchAllData()
+    // Refresh data every 30 seconds
+    const interval = setInterval(fetchAllData, 30000)
+    return () => clearInterval(interval)
   }, [])
+
+  const fetchAllData = async () => {
+    await Promise.all([
+      fetchRequests(),
+      fetchMatchedRequests(),
+      fetchNotifications(),
+      fetchPendingMatches(),
+      fetchActiveMatches(),
+    ])
+  }
 
   const fetchRequests = async () => {
     try {
@@ -61,6 +127,24 @@ function RequesterDashboard() {
       }
     } catch (error) {
       console.error("Error fetching requests:", error)
+    }
+  }
+
+  const fetchMatchedRequests = async () => {
+    try {
+      const token = localStorage.getItem("token")
+      const response = await fetch(`${API_BASE_URL}/api/requester/matched-requests`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setMatchedRequests(data)
+      }
+    } catch (error) {
+      console.error("Error fetching matched requests:", error)
     }
   }
 
@@ -82,19 +166,49 @@ function RequesterDashboard() {
     }
   }
 
+  const fetchPendingMatches = async () => {
+    try {
+      const token = localStorage.getItem("token")
+      const response = await fetch(`${API_BASE_URL}/api/matches/pending`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setPendingMatches(data)
+      }
+    } catch (error) {
+      console.error("Error fetching pending matches:", error)
+    }
+  }
+
+  const fetchActiveMatches = async () => {
+    try {
+      const token = localStorage.getItem("token")
+      const response = await fetch(`${API_BASE_URL}/api/matches/active`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+
+      if (response.ok) {
+        const data = await response.json()
+        setActiveMatches(data)
+      }
+    } catch (error) {
+      console.error("Error fetching active matches:", error)
+    }
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
 
     try {
       const token = localStorage.getItem("token")
-      // Use different endpoint based on user status
-      const endpoint =
-        user?.matchStatus === "Matched"
-          ? `${API_BASE_URL}/api/requester/new-request`
-          : `${API_BASE_URL}/api/requester/request`
-
-      const response = await fetch(endpoint, {
+      const response = await fetch(`${API_BASE_URL}/api/requester/request`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -107,9 +221,8 @@ function RequesterDashboard() {
         const data = await response.json()
         setShowForm(false)
         setFormData({ bloodGroup: "A+", urgency: "medium", description: "" })
-        fetchRequests()
-        // Show success message
-        alert(data.message || "Request submitted successfully!")
+        fetchAllData()
+        alert(data.message || "Request submitted successfully! Looking for compatible donors...")
       } else {
         const errorData = await response.json()
         alert(errorData.message || "Failed to submit request")
@@ -138,8 +251,7 @@ function RequesterDashboard() {
       })
 
       if (response.ok) {
-        fetchRequests()
-        fetchNotifications() // Refresh to see any new notifications
+        fetchAllData()
         alert("Request cancelled successfully")
       } else {
         const data = await response.json()
@@ -151,11 +263,53 @@ function RequesterDashboard() {
     }
   }
 
+  const respondToMatch = async (matchId: string, response: "accepted" | "rejected") => {
+    setRespondingTo(matchId)
+    try {
+      const token = localStorage.getItem("token")
+      const apiResponse = await fetch(`${API_BASE_URL}/api/matches/${matchId}/respond`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ response }),
+      })
+
+      if (apiResponse.ok) {
+        const data = await apiResponse.json()
+        alert(data.message)
+        fetchAllData() // Refresh all data
+      } else {
+        const errorData = await apiResponse.json()
+        alert(errorData.message || "Failed to respond to match")
+      }
+    } catch (error) {
+      console.error("Error responding to match:", error)
+      alert("Error responding to match")
+    } finally {
+      setRespondingTo(null)
+    }
+  }
+
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
     setFormData({
       ...formData,
       [e.target.name]: e.target.value,
     })
+  }
+
+  const getTimeRemaining = (expiresAt: string) => {
+    const now = new Date()
+    const expiry = new Date(expiresAt)
+    const diff = expiry.getTime() - now.getTime()
+
+    if (diff <= 0) return "Expired"
+
+    const hours = Math.floor(diff / (1000 * 60 * 60))
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
+
+    return `${hours}h ${minutes}m remaining`
   }
 
   return (
@@ -173,30 +327,98 @@ function RequesterDashboard() {
       </div>
 
       <div className="dashboard-content">
-        {/* Notifications Section */}
+        {/* Pending Match Responses */}
+        {pendingMatches.length > 0 && (
+          <div className="card">
+            <h3>🔍 Potential Donors ({pendingMatches.length})</h3>
+            <div className="match-requests-list">
+              {pendingMatches.map((match) => (
+                <div key={match._id} className="match-request-item">
+                  <div className="match-info">
+                    <h4>
+                      {match.donorName} ({match.donor.bloodGroup}) can help
+                    </h4>
+                    <p>
+                      <strong>Time:</strong> <span className="time-remaining">{getTimeRemaining(match.expiresAt)}</span>
+                    </p>
+                    {match.donorResponse === "accepted" && (
+                      <p className="other-response">✅ Donor has already accepted</p>
+                    )}
+                    {match.donorResponse === "pending" && (
+                      <p className="other-response">⏳ Waiting for donor's response</p>
+                    )}
+                  </div>
+                  <div className="match-actions">
+                    {match.requesterResponse === "pending" && match.donorResponse === "accepted" ? (
+                      <div className="response-buttons">
+                        <button
+                          onClick={() => respondToMatch(match._id, "accepted")}
+                          disabled={respondingTo === match._id}
+                          className="accept-btn"
+                        >
+                          {respondingTo === match._id ? "Accepting..." : "Accept Donor"}
+                        </button>
+                        <button
+                          onClick={() => respondToMatch(match._id, "rejected")}
+                          disabled={respondingTo === match._id}
+                          className="reject-btn"
+                        >
+                          {respondingTo === match._id ? "Rejecting..." : "Reject"}
+                        </button>
+                      </div>
+                    ) : match.requesterResponse !== "pending" ? (
+                      <div className={`response-status ${match.requesterResponse}`}>
+                        {match.requesterResponse === "accepted" ? "✅ You accepted" : "❌ You rejected"}
+                      </div>
+                    ) : (
+                      <div className="waiting-status">⏳ Waiting for donor to respond first</div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Active Matches */}
+        {activeMatches.length > 0 && (
+          <div className="card">
+            <h3>🎉 Confirmed Donors ({activeMatches.length})</h3>
+            <div className="active-matches-list">
+              {activeMatches.map((match) => (
+                <div key={match._id} className="active-match-item">
+                  <div className="match-header">
+                    <h4>Match with {match.donorName}</h4>
+                    <span className="blood-group">{match.bloodGroup}</span>
+                  </div>
+                  <div className="contact-info">
+                    <h5>📞 Donor Contact Information:</h5>
+                    <p>
+                      <strong>Email:</strong> {match.donorInfo.email}
+                    </p>
+                    <p>
+                      <strong>Phone:</strong> {match.donorInfo.phone}
+                    </p>
+                    <p>
+                      <strong>Location:</strong> {match.donorInfo.location}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Recent Notifications */}
         {notifications.length > 0 && (
           <div className="card">
             <h3>🔔 Recent Notifications</h3>
             <div className="notifications-list">
-              {notifications.slice(0, 3).map((notification) => (
+              {notifications.slice(0, 5).map((notification) => (
                 <div key={notification._id} className={`notification-item ${notification.type}`}>
                   <div className="notification-content">
                     <h4>{notification.title}</h4>
                     <p>{notification.message}</p>
-                    {notification.data?.donorInfo && (
-                      <div className="contact-info">
-                        <h5>📞 Donor Contact Information:</h5>
-                        <p>
-                          <strong>Email:</strong> {notification.data.donorInfo.email}
-                        </p>
-                        <p>
-                          <strong>Phone:</strong> {notification.data.donorInfo.phone}
-                        </p>
-                        <p>
-                          <strong>Location:</strong> {notification.data.donorInfo.location}
-                        </p>
-                      </div>
-                    )}
                     <small>{new Date(notification.createdAt).toLocaleString()}</small>
                   </div>
                 </div>
@@ -205,31 +427,20 @@ function RequesterDashboard() {
           </div>
         )}
 
+        {/* Blood Request Form */}
         <div className="card">
           <div className="card-header">
-            <h3>{user?.matchStatus === "Matched" ? "Create New Blood Request" : "Blood Requests"}</h3>
+            <h3>Blood Requests</h3>
             <button onClick={() => setShowForm(!showForm)} className="primary-btn">
-              {showForm ? "Cancel" : user?.matchStatus === "Matched" ? "New Request" : "New Request"}
+              {showForm ? "Cancel" : "New Request"}
             </button>
           </div>
 
-          {user?.matchStatus === "Matched" && !showForm && (
-            <div className="match-info">
-              <p className="matched-status">
-                🩸 You are currently matched with a donor. Check your notifications for contact details.
-              </p>
-              <p className="re-entry-info">💡 You can create a new blood request if you need additional donations.</p>
-            </div>
-          )}
-
           {showForm && (
             <form onSubmit={handleSubmit} className="request-form">
-              {user?.matchStatus === "Matched" && (
-                <div className="form-notice">
-                  <p>📋 Creating a new request will make you available for additional matches.</p>
-                </div>
-              )}
-              {/* Rest of the form remains the same */}
+              <div className="form-notice">
+                <p>📋 Creating a new request will automatically search for compatible donors.</p>
+              </div>
               <div className="form-group">
                 <label htmlFor="bloodGroup">Blood Group Needed</label>
                 <select id="bloodGroup" name="bloodGroup" value={formData.bloodGroup} onChange={handleChange}>
@@ -262,16 +473,17 @@ function RequesterDashboard() {
                 />
               </div>
               <button type="submit" disabled={loading} className="submit-btn">
-                {loading ? "Submitting..." : user?.matchStatus === "Matched" ? "Create New Request" : "Submit Request"}
+                {loading ? "Submitting..." : "Submit Request"}
               </button>
             </form>
           )}
         </div>
 
+        {/* My Active Requests */}
         <div className="card">
-          <h3>My Requests</h3>
+          <h3>My Active Requests</h3>
           {requests.length === 0 ? (
-            <p>No requests yet.</p>
+            <p>No active requests. Create a new request to find donors.</p>
           ) : (
             <div className="requests-list">
               {requests.map((request) => (
@@ -281,7 +493,7 @@ function RequesterDashboard() {
                       <strong>Blood Group:</strong> {request.bloodGroup}
                     </p>
                     <p>
-                      <strong>Urgency:</strong> {request.urgency}
+                      <strong>Urgency:</strong> <span className={`urgency ${request.urgency}`}>{request.urgency}</span>
                     </p>
                     <p>
                       <strong>Description:</strong> {request.description}
@@ -292,7 +504,7 @@ function RequesterDashboard() {
                   </div>
                   <div className="request-actions">
                     <div className={`status ${request.status.toLowerCase().replace(" ", "-")}`}>{request.status}</div>
-                    {(request.status === "Pending" || request.status === "Matched") && (
+                    {request.status === "Pending" && (
                       <button
                         onClick={() => cancelRequest(request._id)}
                         className="cancel-btn"
@@ -307,6 +519,42 @@ function RequesterDashboard() {
             </div>
           )}
         </div>
+
+        {/* Matched Requests History */}
+        {matchedRequests.length > 0 && (
+          <div className="card">
+            <h3>📋 Matched Requests History</h3>
+            <div className="requests-list">
+              {matchedRequests.map((request) => (
+                <div key={request._id} className="request-item matched-request">
+                  <div className="request-info">
+                    <p>
+                      <strong>Blood Group:</strong> {request.bloodGroup}
+                    </p>
+                    <p>
+                      <strong>Urgency:</strong> <span className={`urgency ${request.urgency}`}>{request.urgency}</span>
+                    </p>
+                    <p>
+                      <strong>Description:</strong> {request.description}
+                    </p>
+                    <p>
+                      <strong>Requested:</strong> {new Date(request.createdAt).toLocaleDateString()}
+                    </p>
+                    <p>
+                      <strong>Matched:</strong> {new Date(request.matchedAt).toLocaleDateString()}
+                    </p>
+                    <p>
+                      <strong>Donor:</strong> {request.matchedWith.username} ({request.matchedWith.bloodGroup})
+                    </p>
+                  </div>
+                  <div className="request-actions">
+                    <div className="status matched">✅ Matched</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
